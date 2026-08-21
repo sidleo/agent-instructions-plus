@@ -73,22 +73,14 @@ export function apply(ctx) {
     const [error, setError] = React.useState('')
     const [saved, setSaved] = React.useState(false)
 
-    // host.call is the sandbox RPC to the host half's harness.handle handlers.
-    // Guard in case the client-runner doesn't provide it (e.g. older DSH builds).
-    var canCall = typeof host !== 'undefined' && host && typeof host.call === 'function'
-    console.log('[instruction-scan] canCall:', canCall, 'host:', typeof host)
-
+    // Formal-host path: the host half registers HTTP JSON endpoints via
+    // webServer (harness.handle is a dynamic-plugin-only builtin and is not
+    // available to bundle-installed plugins), so the card talks over fetch().
     React.useEffect(function () {
       let alive = true
-      if (canCall) {
-        host.call('instruction-scan/get-config')
-          .then(function (cfg) { console.log('[instruction-scan] GET via host.call:', cfg); if (alive) setConfig(cfg) })
-          .catch(function (err) { console.error('[instruction-scan] GET host.call error:', err) })
-      } else {
-        fetch('/api/instruction-scan/config').then(function (r) { return r.json() })
-          .then(function (cfg) { console.log('[instruction-scan] GET via fetch:', cfg); if (alive) setConfig(cfg) })
-          .catch(function (err) { console.error('[instruction-scan] GET fetch error:', err) })
-      }
+      fetch('/api/instruction-scan/config').then(function (r) { return r.json() })
+        .then(function (cfg) { console.log('[instruction-scan] GET config:', cfg); if (alive) setConfig(cfg) })
+        .catch(function (err) { console.error('[instruction-scan] GET config error:', err) })
       return function () { alive = false }
     }, [])
 
@@ -105,19 +97,13 @@ export function apply(ctx) {
           throw new Error((result && result.error) || 'save failed')
         }
       }
-      if (canCall) {
-        host.call('instruction-scan/set-config', next)
-          .then(handleResult)
-          .catch(function (err) { console.error('[instruction-scan] POST host.call error:', err); setError(String(err && err.message ? err.message : err)) })
-      } else {
-        fetch('/api/instruction-scan/config', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(next),
-        }).then(function (r) { return r.json() })
-          .then(handleResult)
-          .catch(function (err) { console.error('[instruction-scan] POST fetch error:', err); setError(String(err && err.message ? err.message : err)) })
-      }
+      fetch('/api/instruction-scan/config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(next),
+      }).then(function (r) { return r.json() })
+        .then(handleResult)
+        .catch(function (err) { console.error('[instruction-scan] POST config error:', err); setError(String(err && err.message ? err.message : err)) })
     }
 
     // Fallback config while loading (card is always interactive).

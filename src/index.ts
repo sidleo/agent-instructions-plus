@@ -24,7 +24,7 @@ import {
   scanDirectories,
   type DiscoveredFile,
 } from './discovery.ts'
-import { wizardReplace, wizardRestore, wizardStatus } from './wizard.ts'
+import { wizardReplace } from './wizard.ts'
 
 export type { InstructionScanConfig } from './config.ts'
 export { normalizeConfig, DEFAULT_CONFIG } from './config.ts'
@@ -148,61 +148,123 @@ export function apply(ctx: Context, config: InstructionScanConfig = DEFAULT_CONF
   // Expose as module-level singleton for cross-plugin consumption.
   currentProvider = provider
 
-  // ── RPC surface ─────────────────────────────────────────────────
-  const rpc = ctx.get('harness') as { handle?: (m: string, h: (a: unknown) => unknown) => unknown } | undefined
-  console.log('[instruction-scan] rpc available:', !!rpc?.handle)
-  if (rpc?.handle) {
-    rpc.handle('instruction-scan/get-config', () => {
-      console.log('[instruction-scan] host: get-config called, cfg:', cfg)
-      return JSON.parse(JSON.stringify(cfg))
+  // ── HTTP RPC surface (formal-host path) ───────────────────────────
+  // The web GUI card talks to the host over HTTP JSON endpoints (same
+  // mechanism as skill-scan). `harness.handle` is a DYNAMIC-plugin-only
+  // builtin and is NOT available to bundle-installed host halves, so the
+  // browser half must use fetch() against these routes, never host.call().
+  const webServer = ctx.get('webServer') as
+    | { register(route: { kind: string; path: string; handler: (req: unknown, res: unknown) => void | Promise<void> }): () => void }
+    | undefined
+
+  /** Drain a JSON request body into a string (lightweight read). */
+  async function readBodyLight(req: { on?: (event: 'data' | 'end' | 'error', cb: (chunk?: Buffer) => void) => void }): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = []
+      req.on?.('data', (chunk) => { chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))) })
+      req.on?.('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+      req.on?.('error', reject)
     })
-    rpc.handle('instruction-scan/set-config', (args: unknown) => {
-      console.log('[instruction-scan] host: set-config called, args:', args)
-      cfg = normalizeConfig(args)
-      persistConfig(cfg)
-      console.log('[instruction-scan] host: set-config persisted, cfg:', cfg)
-      return { ok: true, config: JSON.parse(JSON.stringify(cfg)) }
-    })
-    rpc.handle('instruction-scan/roots', (args: unknown) => {
-      const cwd = resolveCwdFromArgs(args)
-      return { cwd, roots: previewRoots(cfg, cwd) }
-    })
-    rpc.handle('instruction-scan/discover', (args: unknown) => {
-      const cwd = resolveCwdFromArgs(args)
-      const files = discoverInstructionFiles(cfg, cwd, 1_048_576)
-      return {
-        cwd,
-        roots: previewRoots(cfg, cwd),
-        files: files.map(f => ({
-          absolutePath: f.absolutePath,
-          displayPath: f.displayPath,
-          source: f.source,
-          rank: f.rank,
-          bytes: Buffer.byteLength(f.content, 'utf8'),
-        })),
-      }
-    })
-    rpc.handle('instruction-scan/scan-dirs', (args: unknown) => {
-      const cwd = resolveCwdFromArgs(args)
-      return {
-        cwd,
-        dirs: scanDirectories(cfg, cwd).map(d => ({
-          dir: d.dir,
-          scope: d.scope,
-          source: d.source,
-          rank: d.rank,
-        })),
-      }
-    })
-    rpc.handle('instruction-scan/wizard-status', () => wizardStatus(ctx))
-    rpc.handle('instruction-scan/wizard-replace', () => wizardReplace(ctx))
-    rpc.handle('instruction-scan/wizard-restore', () => wizardRestore(ctx))
   }
 
-  /** Resolve cwd from args, session state, or workspace registry fallback. */
-  function resolveCwdFromArgs(args: unknown): string {
-    if (args && typeof args === 'object' && typeof (args as Record<string, unknown>).cwd === 'string') {
-      return (args as { cwd: string }).cwd
+  /** Helper: JSON response for a route handler. */
+  function jsonResponse(res: { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, body: unknown): void {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(body))
+  }
+  function jsonError(res: { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, message: string): void {
+    res.writeHead(400, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, error: message }))
+  }
+
+  if (webServer?.register) {
+    // GET /api/instruction-scan/config — current config
+    // POST /api/instruction-scan/config — save config
+    webServer.register({
+      kind: 'exact',
+      path: '/api/instruction-scan/config',
+      handler: async (req, res) => {
+        const method = (req as { method?: string })?.method
+        if (method === 'POST') {
+          let parsed: unknown
+          try {
+            parsed = JSON.parse(await readBodyLight(req as { on?: (event: 'data' | 'end' | 'error', cb: (chunk?: Buffer) => void) => void }))
+          } catch {
+            return jsonError(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, 'invalid JSON body')
+          }
+          try {
+            cfg = normalizeConfig(parsed)
+          } catch (error: unknown) {
+            return jsonError(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, error instanceof Error ? error.message : String(error))
+          }
+          persistConfig(cfg)
+          console.log('[instruction-scan] host: config saved:', JSON.stringify(cfg))
+          return jsonResponse(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, { ok: true, config: JSON.parse(JSON.stringify(cfg)) })
+        }
+        jsonResponse(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, JSON.parse(JSON.stringify(cfg)))
+      },
+    })
+
+    // GET /api/instruction-scan/roots — scan root directories for a cwd
+    webServer.register({
+      kind: 'exact',
+      path: '/api/instruction-scan/roots',
+      handler: async (req, res) => {
+        const cwd = resolveCwdFromHttp(req)
+        jsonResponse(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, { cwd, roots: previewRoots(cfg, cwd) })
+      },
+    })
+
+    // GET /api/instruction-scan/discover — scan and list instruction files
+    webServer.register({
+      kind: 'exact',
+      path: '/api/instruction-scan/discover',
+      handler: async (req, res) => {
+        const cwd = resolveCwdFromHttp(req)
+        const files = discoverInstructionFiles(cfg, cwd, 1_048_576)
+        jsonResponse(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, {
+          cwd,
+          roots: previewRoots(cfg, cwd),
+          files: files.map(f => ({
+            absolutePath: f.absolutePath,
+            displayPath: f.displayPath,
+            source: f.source,
+            rank: f.rank,
+            bytes: Buffer.byteLength(f.content, 'utf8'),
+          })),
+        })
+      },
+    })
+
+    // GET /api/instruction-scan/scan-dirs — scan directory model
+    webServer.register({
+      kind: 'exact',
+      path: '/api/instruction-scan/scan-dirs',
+      handler: async (req, res) => {
+        const cwd = resolveCwdFromHttp(req)
+        jsonResponse(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, {
+          cwd,
+          dirs: scanDirectories(cfg, cwd).map(d => ({
+            dir: d.dir,
+            scope: d.scope,
+            source: d.source,
+            rank: d.rank,
+          })),
+        })
+      },
+    })
+  } else {
+    console.log('[instruction-scan] webServer unavailable — GUI config endpoints disabled')
+  }
+
+  /** Resolve cwd from the request query string (?cwd=…), session state, or workspace registry fallback. */
+  function resolveCwdFromHttp(req: unknown): string {
+    const url = (req as { url?: string })?.url
+    if (typeof url === 'string') {
+      const match = /[?&]cwd=([^&]+)/.exec(url)
+      if (match) {
+        try { return decodeURIComponent(match[1]) } catch { /* fall through */ }
+      }
     }
     if (lastCwd) return lastCwd
     // Try workspace registry (available when DSH web GUI is running).
