@@ -25,6 +25,7 @@ import {
   type DiscoveredFile,
 } from './discovery.ts'
 import { wizardReplace } from './wizard.ts'
+import { apply as applyInjectionPipeline } from './preset.ts'
 
 export type { InstructionScanConfig } from './config.ts'
 export { normalizeConfig, DEFAULT_CONFIG } from './config.ts'
@@ -293,4 +294,13 @@ export function apply(ctx: Context, config: InstructionScanConfig = DEFAULT_CONF
       if (session?.header?.cwd) lastCwd = session.header.cwd
     }
   })
+
+  // ── Host-plane injection pipeline (all presets) ─────────────────
+  // Mount the workspace-instruction injection pipeline at HOST scope: an
+  // unscoped `ctx.on` listener is `hook.global`, so it receives `agent/pre-step`
+  // for EVERY agent regardless of preset. This makes instruction-scan effective
+  // in all modes (standard/liangshen/code/…) without copying or editing any
+  // preset. The pipeline replaces built-in agent-instructions messages in the
+  // inbox, so there is no duplicate injection.
+  applyInjectionPipeline(ctx, cfg)
 }
