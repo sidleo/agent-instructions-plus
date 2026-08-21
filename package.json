@@ -1,6 +1,6 @@
 {
   "name": "@sidleo3/instruction-scan",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Configurable AGENTS.md file discovery provider for DSH: scan cwd / project / ancestors / global, editable candidates and project-root markers, replacing hardcoded discovery in dsh-agent-instructions.",
   "keywords": [
     "deepseek-harness",
