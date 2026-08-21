@@ -48,7 +48,9 @@ export {
 export { renderWorkspaceContext, renderInstructionChanges, candidateScopeKey, decodeScopeKey, instructionScopeKey, USER_GLOBAL_DIRECTORY, USER_GLOBAL_FILE, type RenderedWorkspaceContext, type AgentInstructionChange } from './render.ts'
 
 export const name = 'instruction-scan'
-export const inject = [] as const
+// Hard dependency on the browser HTTP carrier so the GUI config endpoints
+// are registered only after webServer is ready (same pattern as skill-scan).
+export const inject = ['webServer'] as const
 
 // ── Config persistence ──────────────────────────────────────────────
 
