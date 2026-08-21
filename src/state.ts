@@ -40,6 +40,8 @@ export interface AgentInstructionSource {
   form: 'instructions'
   /** Marks the complete startup/resume baseline rather than a later delta. */
   baseline?: true
+  /** Marks injection by instruction-scan (as opposed to the built-in provider). */
+  provider?: 'instruction-scan'
   /** Discovery, precedence, and budget identity used to validate a resumed baseline. */
   baselineIdentity?: string
   changes: AgentInstructionChange[]
@@ -77,7 +79,12 @@ export interface ReconciledInstructionContext {
 function workspaceContextHook(text: string, changes: AgentInstructionChange[]): UserMessage {
   return createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: 'agent-instructions', form: 'instructions', changes },
+    source: {
+      kind: 'agent-instructions',
+      form: 'instructions',
+      provider: 'instruction-scan',
+      changes,
+    },
   })
 }
 
@@ -89,7 +96,7 @@ function workspaceContextHook(text: string, changes: AgentInstructionChange[]): 
 export function workspaceContextMessage(text: string): Message {
   return createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: name },
+    source: { kind: 'plugin', plugin: name, provider: 'instruction-scan' },
   })
 }
 

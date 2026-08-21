@@ -81,6 +81,17 @@ function isWorkspaceContext(message: UserMessage): boolean {
   return message.source.kind === 'agent-instructions'
 }
 
+/**
+ * True when the message's source is OUR injection (carries the
+ * `provider: instruction-scan` marker). The built-in dsh-agent-instructions
+ * row injects with kind `agent-instructions` but no provider marker; we drop
+ * those in pre-step to avoid duplicate workspace-instruction blocks.
+ */
+function isOwnInjection(message: UserMessage): boolean {
+  const src = message.source as { provider?: unknown }
+  return src.provider === 'instruction-scan'
+}
+
 function sameContextPayload(left: UserMessage, right: UserMessage): boolean {
   return isDeepStrictEqual(left.content, right.content)
     && isDeepStrictEqual(left.source, right.source)
@@ -207,6 +218,7 @@ export function apply(ctx: Context, config: Partial<InstructionScanConfig> = {})
           source: {
             kind: 'agent-instructions',
             form: 'instructions',
+            provider: 'instruction-scan',
             baseline: true,
             baselineIdentity: identity,
             changes: baselineChanges,
@@ -244,6 +256,7 @@ export function apply(ctx: Context, config: Partial<InstructionScanConfig> = {})
       source: {
         kind: 'agent-instructions',
         form: 'instructions',
+        provider: 'instruction-scan',
         ...desiredBaseline ? { baseline: true } : {},
         ...desiredBaseline ? { baselineIdentity: identity } : {},
         changes,
@@ -358,22 +371,33 @@ export function apply(ctx: Context, config: Partial<InstructionScanConfig> = {})
     const pending = agent.inbox.nextStep.filter(isWorkspaceContext)
     const desired = await compose(agent, signal, messages, pending)
     signal.throwIfAborted()
+    // Drop workspace-instruction messages produced by OTHER providers (the
+    // built-in dsh-agent-instructions row in each preset injects without a
+    // `provider` marker). Our own injections carry `provider: instruction-scan`
+    // and are folded below; removing the unmarked ones prevents duplicates.
+    const decisionMessages = decision.kind === 'enter' ? decision.messages : []
+    const cleanMessages = decisionMessages.filter((message: UserMessage) => (
+      !isWorkspaceContext(message) || isOwnInjection(message)
+    ))
+    const decisionCleaned: PreStepDecision = cleanMessages.length === decisionMessages.length
+      ? decision
+      : { kind: 'enter', messages: cleanMessages }
     // An empty first entry owns a no-step turn; keep context pending instead
     // of turning it into a standalone request. Later entries may be tool continuations.
-    if (decision.kind === 'reject' || (step === 1 && decision.messages.length === 0)) {
+    if (decisionCleaned.kind === 'reject' || (step === 1 && decisionCleaned.messages.length === 0)) {
       syncInbox(agent, messages, desired)
-      return decision
+      return decisionCleaned
     }
     // A proceeding step settles the pending context: it either enters below as
     // `desired`, or its payload is already covered by the batch, so nothing stays pending.
     for (const message of pending) agent.inbox.remove(message.id)
-    if (desired === undefined || decision.messages.some(message => sameContextPayload(message, desired))) {
-      return decision
+    if (desired === undefined || decisionCleaned.messages.some(message => sameContextPayload(message, desired))) {
+      return decisionCleaned
     }
     // Fold the context right after the claimed batch, so the direct prompt
     // precedes it and the driver-appended runtime context follows it.
-    const lastClaimedIndex = decision.messages.findLastIndex(message => messages.includes(message))
-    const entered = decision.messages.toSpliced(lastClaimedIndex + 1, 0, desired)
+    const lastClaimedIndex = decisionCleaned.messages.findLastIndex(message => messages.includes(message))
+    const entered = decisionCleaned.messages.toSpliced(lastClaimedIndex + 1, 0, desired)
     return { kind: 'enter', messages: entered }
   })
 
