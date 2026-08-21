@@ -1,14 +1,19 @@
 /**
- * Generate the replacement preset: copy the liangshen preset to
+ * Generate the replacement preset: copy the standard preset to
  * ~/.dsh/.agent-presets/instruction-scan, disable its agent-instructions row,
  * and insert the instruction-scan pipeline row right after it.
  * Mirrors src/wizard.ts (which runs in the formal host during install).
+ *
+ * Usage: node gen-replacement-preset.mjs [source-preset-path]
+ *   source-preset-path defaults to the shipped standard preset under the
+ *   DSH deployment checkout; pass an explicit path (e.g. the liangshen copy)
+ *   to generate from another preset.
  */
 import { cp, mkdir, readFile, writeFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parseDocument } from 'yaml'
 
-const SRC = '/Users/zhang3/.dsh/.agent-presets/liangshen'
+const SRC = process.argv[2] ?? '/Users/zhang3/deepseek-harness/apps/cli/config/agent-presets/standard'
 const DST = '/Users/zhang3/.dsh/.agent-presets/instruction-scan'
 
 await mkdir(DST, { recursive: true })
@@ -46,7 +51,7 @@ await writeFile(path, doc.toString(), 'utf8')
 
 await writeFile(
   join(DST, 'preset.yml'),
-  'name: 指令扫描模式\n' + 'description: 由 instruction-scan 接管工作区指令注入的梁神模式（agent-instructions 已禁用）。\n',
+  'name: 指令扫描模式\n' + 'description: standard 编码代理 + instruction-scan 接管工作区指令注入（agent-instructions 已禁用，支持 cwd/项目/上级遍历/全局四层）。\n',
   'utf8',
 )
 
