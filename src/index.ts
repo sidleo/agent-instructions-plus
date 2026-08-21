@@ -24,7 +24,6 @@ import {
   scanDirectories,
   type DiscoveredFile,
 } from './discovery.ts'
-import { wizardReplace } from './wizard.ts'
 import { apply as applyInjectionPipeline } from './preset.ts'
 
 export type { InstructionScanConfig } from './config.ts'
@@ -113,24 +112,12 @@ export function apply(ctx: Context, config: InstructionScanConfig = DEFAULT_CONF
   let cfg = loadPersistedConfig(config.dshHome) ?? normalizeConfig(config)
   let lastCwd: string | undefined
 
-  // ── Install-time bootstrap ──────────────────────────────────────────
-  // Runs once per plugin activation (idempotent): generates the replacement
-  // agent preset (copy of the current preset with agent-instructions disabled
-  // and the injection pipeline inserted) and seeds the persisted config with
-  // scanParents when no disk config exists yet. Users install the plugin and
-  // pick the 指令扫描模式 preset in a new session — no manual edits needed.
-  void (async () => {
-    try {
-      const result = await wizardReplace(ctx)
-      console.log('[instruction-scan] install bootstrap:', result?.message ?? result?.error ?? 'done')
-    } catch (error: unknown) {
-      console.log('[instruction-scan] install bootstrap skipped:', error instanceof Error ? error.message : String(error))
-    }
-  })()
+  // ── First-install config seed ───────────────────────────────────────
+  // The host-plane injection pipeline (mounted below) serves every preset,
+  // so no replacement preset is needed. On first activation with no disk
+  // config, seed a parents-mode default so the GUI toggle matches reality.
   const persisted = loadPersistedConfig(config.dshHome)
   if (persisted === undefined) {
-    // First install: seed a parents-mode default so the toggle in the GUI
-    // matches what the replacement preset actually uses.
     const seeded = normalizeConfig({ ...DEFAULT_CONFIG, scanProject: false, scanParents: true })
     persistConfig(seeded)
     cfg = seeded
