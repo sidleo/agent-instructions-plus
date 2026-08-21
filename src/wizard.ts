@@ -1,0 +1,129 @@
+/**
+ * instruction-scan install wizard — @sidleo3/instruction-scan
+ *
+ * First-run choice: REPLACE `agent-instructions` or COEXIST.
+ *
+ *  - replace: `ctx.agentPresets.copy(current, 'instruction-scan')`, then edit
+ *    the copy's `agent.cordis.yml` so the `agent-instructions` row is
+ *    `disabled: true` and an `instruction-scan` row (the injection pipeline)
+ *    is inserted right after it. The original preset is untouched and the copy
+ *    is removable.
+ *  - coexist: nothing changes (the original provider keeps injecting).
+ *
+ * These run only in the formal host, which holds full `ctx` (`ctx.agentPresets`,
+ * `node:fs`, `yaml`).
+ *
+ * @module @sidleo3/instruction-scan/wizard
+ */
+
+import { readFile, writeFile } from 'node:fs/promises'
+import { parseDocument } from 'yaml'
+
+export const PRESET_ID = 'instruction-scan'
+/** The preset row id the injection pipeline registers under. */
+export const PIPELINE_ROW_ID = 'instruction-scan-pipeline'
+
+/** Minimal host-context shape for the wizard (agentPresets only). */
+export interface WizardContext {
+  get(name: string): unknown
+}
+
+export interface WizardStatus {
+  available: boolean
+  current?: string
+  hasOriginal?: boolean
+  copied?: boolean
+  mode?: 'replace' | 'coexist'
+}
+
+interface AgentPresets {
+  resolve(id?: string): Promise<{ id: string; path: string }>
+  read(id: string): Promise<string>
+  copy(from: string, id: string): Promise<unknown>
+  remove(id: string): Promise<unknown>
+}
+
+function agentPresets(ctx: WizardContext): AgentPresets | undefined {
+  return ctx.get('agentPresets') as AgentPresets | undefined
+}
+
+/** Query first-run state for the replacing preset. */
+export async function wizardStatus(ctx: WizardContext): Promise<WizardStatus> {
+  const ap = agentPresets(ctx)
+  if (ap === undefined) return { available: false }
+  const current = await ap.resolve().catch(() => undefined)
+  let hasOriginal = false
+  try {
+    if (current !== undefined) {
+      const text = await ap.read(current.id)
+      hasOriginal = /agent-instructions/.test(text)
+    }
+  } catch { /* keep false */ }
+  const copy = await ap.resolve(PRESET_ID).catch(() => undefined)
+  return {
+    available: true,
+    current: current?.id,
+    hasOriginal,
+    copied: copy !== undefined,
+    mode: copy !== undefined ? 'replace' : 'coexist',
+  }
+}
+
+/** Generate the replacing preset (copy + disable original + insert pipeline row). */
+export async function wizardReplace(
+  ctx: WizardContext,
+): Promise<{ ok: boolean; presetId?: string; message?: string; error?: string }> {
+  const ap = agentPresets(ctx)
+  if (ap === undefined) return { ok: false, error: 'agentPresets 服务不可用' }
+  const current = await ap.resolve()
+  const text = await ap.read(current.id)
+  if (!/agent-instructions/.test(text)) {
+    return { ok: false, error: `当前预设 ${current.id} 不含 agent-instructions，无需替换` }
+  }
+  try { await ap.copy(current.id, PRESET_ID) } catch { /* id occupied -> reuse */ }
+  const copy = await ap.resolve(PRESET_ID)
+  const copyText = await readFile(copy.path, 'utf8')
+  const doc = parseDocument(copyText)
+  const seq = doc.get('entries', true)
+  let disabled = false
+  if (seq !== undefined && Array.isArray(seq)) {
+    for (const row of seq) {
+      if (row && typeof row === 'object' && 'id' in row && (row as { id?: unknown }).id === 'agent-instructions') {
+        ;(row as Record<string, unknown>).disabled = true
+        disabled = true
+      }
+    }
+  }
+  if (!disabled) {
+    return { ok: false, error: '副本中未找到 agent-instructions 行，停止替换' }
+  }
+  const pipelineRow: Record<string, unknown> = {
+    id: PIPELINE_ROW_ID,
+    // The injection pipeline lives on the `/preset` export; the package root
+    // is the host entry (RPC/GUI) and must not mount into a session preset.
+    name: '@sidleo3/instruction-scan/preset',
+  }
+  pipelineRow.config = { maxBytes: 65536, maxSourceBytes: 1048576 }
+  if (seq !== undefined && Array.isArray(seq)) {
+    const index = seq.findIndex(row => (
+      row && typeof row === 'object' && 'id' in row && (row as { id?: unknown }).id === 'agent-instructions'
+    ))
+    seq.splice(index + 1, 0, pipelineRow)
+  }
+  await writeFile(copy.path, doc.toString(), 'utf8')
+  return {
+    ok: true,
+    presetId: PRESET_ID,
+    message: `已生成替换预设 "${PRESET_ID}"（agent-instructions 已禁用，注入管线已插入）。新建会话时选择该预设即生效，原始预设 ${current.id} 保持不动。`,
+  }
+}
+
+/** Remove the replacing preset, back to coexist / original. */
+export async function wizardRestore(
+  ctx: WizardContext,
+): Promise<{ ok: boolean; message?: string; error?: string }> {
+  const ap = agentPresets(ctx)
+  if (ap === undefined) return { ok: false, error: 'agentPresets 服务不可用' }
+  await ap.remove(PRESET_ID).catch(() => {})
+  return { ok: true, message: '已删除替换预设 instruction-scan，恢复为原始预设/共存模式。' }
+}
