@@ -1,6 +1,6 @@
 {
   "name": "@sidleo3/agent-instructions-plus",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "agent-instructions-plus: preset 选择性接管 AGENTS.md 注入，安装零改动，取消即恢复内置 agent-instructions。",
   "keywords": [
     "deepseek-harness",
@@ -88,6 +88,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sidleo/instruction-scan.git"
+    "url": "git+https://github.com/sidleo/agent-instructions-plus.git"
   }
 }
