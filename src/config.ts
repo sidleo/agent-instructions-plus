@@ -1,7 +1,7 @@
 /**
  * Configuration normalization for instruction-file discovery.
  *
- * @module @sidleo3/instruction-scan/config
+ * @module @sidleo3/agent-instructions-plus/config
  */
 
 const DEFAULT_PROJECT_ROOT_MARKERS = ['.git'] as const

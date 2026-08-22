@@ -1,144 +1,302 @@
 /**
- * instruction-scan install wizard — @sidleo3/instruction-scan
+ * agent-instructions-plus preset manager — @sidleo3/agent-instructions-plus
  *
- * First-run choice: REPLACE `agent-instructions` or COEXIST.
+ * Per-preset takeover of workspace-instruction injection. Installation changes
+ * nothing: the host entry registers only the provider + GUI RPC. The user
+ * explicitly picks presets in the GUI; for each picked preset this module
+ * edits the preset's OWN composition in place: the `agent-instructions` row
+ * gets `disabled: true` and the `/preset` injection-pipeline row is inserted
+ * right after it. Unchecking restores the original file from a backup copy.
+ * A DSH upgrade may rewrite the preset file back to pristine; the GUI then
+ * shows it as not enabled and re-checking re-applies the takeover.
  *
- *  - replace: `ctx.agentPresets.copy(current, 'instruction-scan')`, then edit
- *    the copy's `agent.cordis.yml` so the `agent-instructions` row is
- *    `disabled: true` and an `instruction-scan` row (the injection pipeline)
- *    is inserted right after it. The original preset is untouched and the copy
- *    is removable.
- *  - coexist: nothing changes (the original provider keeps injecting).
+ * The preset file is backed up to `.aip-backup/<presetId>.yml` next to the
+ * roster before editing, so removal restores the exact original bytes.
  *
- * These run only in the formal host, which holds full `ctx` (`ctx.agentPresets`,
+ * Runs only in the formal host, which holds full `ctx` (`ctx.agentPresets`,
  * `node:fs`, `yaml`).
  *
- * @module @sidleo3/instruction-scan/wizard
+ * @module @sidleo3/agent-instructions-plus/wizard
  */
 
-import { readFile, writeFile } from 'node:fs/promises'
-import { parseDocument } from 'yaml'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { parseDocument, YAMLSeq } from 'yaml'
 
-export const PRESET_ID = 'instruction-scan'
 /** The preset row id the injection pipeline registers under. */
-export const PIPELINE_ROW_ID = 'instruction-scan-pipeline'
+export const PIPELINE_ROW_ID = 'agent-instructions-plus-pipeline'
+/** Package subpath the pipeline row loads. */
+export const PIPELINE_PACKAGE = '@sidleo3/agent-instructions-plus/preset'
+/** Row id of the built-in workspace-instruction provider inside each preset. */
+const BUILTIN_ROW_ID = 'agent-instructions'
 
-/** Minimal host-context shape for the wizard (agentPresets only). */
+/** Minimal host-context shape for the wizard (agentPresets + write hook). */
 export interface WizardContext {
   get(name: string): unknown
+  /**
+   * Optional composition write hook. The real host writes through the resolved
+   * preset path; tests stub this to avoid touching the filesystem.
+   */
+  writeComposition?(id: string, content: string): Promise<void>
 }
 
-export interface WizardStatus {
-  available: boolean
-  current?: string
-  hasOriginal?: boolean
-  copied?: boolean
-  mode?: 'replace' | 'coexist'
+interface AgentPresetInfo {
+  id: string
+  name?: string
+  description?: string
+  trust?: string
 }
 
-interface AgentPresets {
-  resolve(id?: string): Promise<{ id: string; path: string }>
+interface AgentPresetsService {
+  list(): Promise<AgentPresetInfo[]>
+  resolve(id?: string): Promise<AgentPresetInfo & { path: string }>
   read(id: string): Promise<string>
-  copy(from: string, id: string): Promise<unknown>
-  remove(id: string): Promise<unknown>
 }
 
-function agentPresets(ctx: WizardContext): AgentPresets | undefined {
-  return ctx.get('agentPresets') as AgentPresets | undefined
+function agentPresets(ctx: WizardContext): AgentPresetsService | undefined {
+  return ctx.get('agentPresets') as AgentPresetsService | undefined
 }
 
-/** Query first-run state for the replacing preset. */
-export async function wizardStatus(ctx: WizardContext): Promise<WizardStatus> {
-  const ap = agentPresets(ctx)
-  if (ap === undefined) return { available: false }
-  const current = await ap.resolve().catch(() => undefined)
-  let hasOriginal = false
-  try {
-    if (current !== undefined) {
-      const text = await ap.read(current.id)
-      hasOriginal = /agent-instructions/.test(text)
-    }
-  } catch { /* keep false */ }
-  const copy = await ap.resolve(PRESET_ID).catch(() => undefined)
-  return {
-    available: true,
-    current: current?.id,
-    hasOriginal,
-    copied: copy !== undefined,
-    mode: copy !== undefined ? 'replace' : 'coexist',
-  }
+/** Backup file path for one preset's original composition. */
+function backupPath(presetPath: string): string {
+  return join(dirname(presetPath), '.aip-backup', basename(presetPath))
 }
 
-/** Generate the replacing preset (copy + disable original + insert pipeline row). */
-export async function wizardReplace(
+function basename(p: string): string {
+  return p.split('/').pop() ?? p
+}
+
+/** One preset in the roster with its takeover status. */
+export interface PresetStatus {
+  id: string
+  name: string
+  description?: string
+  trust: string
+  /** True when a backup of the original composition exists. */
+  backupExists: boolean
+  /** True when the preset's agent-instructions-plus-pipeline row is present and not disabled. */
+  pipelineActive: boolean
+  /** True when the preset's built-in agent-instructions row is disabled. */
+  builtinDisabled: boolean
+  /** True when takeover is fully in effect: pipeline active and builtin disabled. */
+  enabled: boolean
+  /** True when the preset carries the built-in agent-instructions row to disable. */
+  hasAgentInstructions: boolean
+}
+
+/** Structured takeover state of one preset, read from its own composition. */
+export interface TakeoverState {
+  backupExists: boolean
+  pipelineActive: boolean
+  builtinDisabled: boolean
+}
+
+/**
+ * Read the takeover state of one preset from its own composition's content.
+ */
+export async function readTakeoverState(
   ctx: WizardContext,
-): Promise<{ ok: boolean; presetId?: string; message?: string; error?: string }> {
+  presetId: string,
+): Promise<TakeoverState> {
+  const ap = agentPresets(ctx)
+  if (ap === undefined) return { backupExists: false, pipelineActive: false, builtinDisabled: false }
+  let preset: AgentPresetInfo & { path: string }
+  try {
+    preset = await ap.resolve(presetId)
+  } catch {
+    return { backupExists: false, pipelineActive: false, builtinDisabled: false }
+  }
+  let backupExists = false
+  try {
+    await readFile(backupPath(preset.path), 'utf8')
+    backupExists = true
+  } catch { /* no backup */ }
+  let text: string
+  try {
+    text = await ap.read(presetId)
+  } catch {
+    return { backupExists, pipelineActive: false, builtinDisabled: false }
+  }
+  let pipelineActive = false
+  let builtinDisabled = false
+  try {
+    const doc = parseDocument(text)
+    const rows = doc.toJS() as unknown
+    if (Array.isArray(rows)) {
+      for (const row of rows) {
+        if (row && typeof row === 'object' && 'id' in row) {
+          const id = (row as { id?: unknown }).id
+          const disabled = (row as { disabled?: unknown }).disabled === true
+          if (id === PIPELINE_ROW_ID) pipelineActive = !disabled
+          if (id === BUILTIN_ROW_ID && disabled) builtinDisabled = true
+        }
+      }
+    }
+  } catch { /* unparsable counts as not active */ }
+  return { backupExists, pipelineActive, builtinDisabled }
+}
+
+/** Current takeover state of every preset. */
+export async function listPresets(ctx: WizardContext): Promise<PresetStatus[]> {
+  const ap = agentPresets(ctx)
+  if (ap === undefined) return []
+  const presets = await ap.list()
+  const out: PresetStatus[] = []
+  for (const p of presets) {
+    let hasAgentInstructions = false
+    try {
+      const text = await ap.read(p.id)
+      hasAgentInstructions = /(?:^|[\s-])id:\s*['"]?agent-instructions['"]?\s*$/m.test(text)
+    } catch { /* keep false */ }
+    const takeover = await readTakeoverState(ctx, p.id)
+    out.push({
+      id: p.id,
+      name: p.name ?? p.id,
+      description: p.description,
+      trust: p.trust ?? 'user',
+      backupExists: takeover.backupExists,
+      pipelineActive: takeover.pipelineActive,
+      builtinDisabled: takeover.builtinDisabled,
+      enabled: takeover.pipelineActive && takeover.builtinDisabled,
+      hasAgentInstructions,
+    })
+  }
+  return out
+}
+
+/**
+ * Enable takeover for one preset by editing its own composition in place:
+ * backup the original, disable its agent-instructions row, insert the
+ * pipeline row right after it.
+ */
+export async function applyPreset(
+  ctx: WizardContext,
+  presetId: string,
+): Promise<{ ok: boolean; message?: string; error?: string }> {
   const ap = agentPresets(ctx)
   if (ap === undefined) return { ok: false, error: 'agentPresets 服务不可用' }
-  const current = await ap.resolve()
-  const text = await ap.read(current.id)
-  if (!/agent-instructions/.test(text)) {
-    return { ok: false, error: `当前预设 ${current.id} 不含 agent-instructions，无需替换` }
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(presetId)) {
+    return { ok: false, error: '预设 id 非法' }
   }
-  try { await ap.copy(current.id, PRESET_ID) } catch { /* id occupied -> reuse */ }
-  const copy = await ap.resolve(PRESET_ID)
-  const copyPath = copy.path
-  const copyText = await readFile(copyPath, 'utf8')
-  // Idempotent: if the pipeline row is already present, the preset was
-  // generated by a previous install — do not re-insert (or re-disable).
-  if (/instruction-scan-pipeline/.test(copyText)) {
-    return { ok: true, presetId: PRESET_ID, message: `替换预设 "${PRESET_ID}" 已存在，跳过生成。` }
+  let preset: AgentPresetInfo & { path: string }
+  try {
+    preset = await ap.resolve(presetId)
+  } catch {
+    return { ok: false, error: '预设不存在: ' + presetId }
   }
-  const doc = parseDocument(copyText)
-  // The composition is a top-level YAML sequence (`- id: …` rows). Some
-  // presets wrap it under an `entries:` key (liangshen-style); the shipped
-  // presets (standard/code/…) are bare top-level sequences. `toJS()` yields a
-  // plain JS array for either shape — work on that, then rewrite the document.
+  const text = await ap.read(presetId).catch(() => '')
+  const hasBuiltin = /(?:^|[\s-])id:\s*['"]?agent-instructions['"]?\s*$/m.test(text)
+  if (!hasBuiltin) {
+    return { ok: false, error: '预设 ' + presetId + ' 不含 agent-instructions 行，无需接管' }
+  }
+  // Idempotent: already taken over.
+  const existing = await readTakeoverState(ctx, presetId)
+  if (existing.pipelineActive && existing.builtinDisabled) {
+    return { ok: true, message: '预设 ' + presetId + ' 已生效' }
+  }
+  // Backup the original bytes (once).
+  if (!existing.backupExists) {
+    try {
+      await mkdir(dirname(backupPath(preset.path)), { recursive: true })
+      await writeFile(backupPath(preset.path), text, 'utf8')
+    } catch (error) {
+      return { ok: false, error: '备份预设失败: ' + (error instanceof Error ? error.message : String(error)) }
+    }
+  }
+  // Edit the composition.
+  const doc = parseDocument(text)
   const js = doc.toJS() as unknown
   const seq = Array.isArray(js) ? js : undefined
   if (seq === undefined) {
     return { ok: false, error: '预设结构无法解析为行序列，停止替换' }
   }
+  let index = -1
   let disabled = false
-  for (const row of seq) {
-    if (row && typeof row === 'object' && 'id' in row && (row as { id?: unknown }).id === 'agent-instructions') {
+  for (let i = 0; i < seq.length; i++) {
+    const row = seq[i]
+    if (row && typeof row === 'object' && 'id' in row && (row as { id?: unknown }).id === BUILTIN_ROW_ID) {
       ;(row as Record<string, unknown>).disabled = true
       disabled = true
+      index = i
     }
   }
-  if (!disabled) {
-    return { ok: false, error: '副本中未找到 agent-instructions 行，停止替换' }
+  if (!disabled || index < 0) {
+    return { ok: false, error: '未找到 agent-instructions 行，停止替换' }
   }
   const pipelineRow: Record<string, unknown> = {
     id: PIPELINE_ROW_ID,
-    // The injection pipeline lives on the `/preset` export; the package root
-    // is the host entry (RPC/GUI) and must not mount into a session preset.
-    name: '@sidleo3/instruction-scan/preset',
+    name: PIPELINE_PACKAGE,
   }
   pipelineRow.config = { maxBytes: 65536, maxSourceBytes: 1048576 }
-  const index = seq.findIndex(row => (
-    row && typeof row === 'object' && 'id' in row && (row as { id?: unknown }).id === 'agent-instructions'
-  ))
   seq.splice(index + 1, 0, pipelineRow)
-  // Rebuild the document from the modified plain sequence.
-  const { YAMLSeq } = await import('yaml')
   const rebuilt = new YAMLSeq<unknown>()
   for (const entry of seq) rebuilt.add(doc.createNode(entry))
   doc.contents = rebuilt as typeof doc.contents
-  await writeFile(copyPath, doc.toString(), 'utf8')
-  return {
-    ok: true,
-    presetId: PRESET_ID,
-    message: `已生成替换预设 "${PRESET_ID}"（agent-instructions 已禁用，注入管线已插入）。新建会话时选择该预设即生效，原始预设 ${current.id} 保持不动。`,
+  const edited = doc.toString()
+  if ('writeComposition' in ctx) {
+    await (ctx as { writeComposition(id: string, content: string): Promise<void> }).writeComposition(presetId, edited)
+  } else {
+    await writeFile(preset.path, edited, 'utf8')
   }
+  return { ok: true, message: '预设 ' + presetId + ' 已生效：agent-instructions 已禁用，注入管线已接管。' }
 }
 
-/** Remove the replacing preset, back to coexist / original. */
-export async function wizardRestore(
+/**
+ * Disable takeover for one preset: restore the original composition from
+ * backup, or reverse the in-place edit if no backup exists.
+ */
+export async function removePreset(
   ctx: WizardContext,
+  presetId: string,
 ): Promise<{ ok: boolean; message?: string; error?: string }> {
   const ap = agentPresets(ctx)
   if (ap === undefined) return { ok: false, error: 'agentPresets 服务不可用' }
-  await ap.remove(PRESET_ID).catch(() => {})
-  return { ok: true, message: '已删除替换预设 instruction-scan，恢复为原始预设/共存模式。' }
+  let preset: AgentPresetInfo & { path: string }
+  try {
+    preset = await ap.resolve(presetId)
+  } catch {
+    return { ok: false, error: '预设不存在: ' + presetId }
+  }
+  const existing = await readTakeoverState(ctx, presetId)
+  if (!existing.pipelineActive && !existing.builtinDisabled && !existing.backupExists) {
+    return { ok: true, message: '预设 ' + presetId + ' 未生效，无需取消' }
+  }
+  // Prefer restoring the exact original bytes from backup.
+  if (existing.backupExists) {
+    const backup = backupPath(preset.path)
+    const original = await readFile(backup, 'utf8').catch(() => undefined)
+    if (original !== undefined) {
+      if ('writeComposition' in ctx) {
+        await (ctx as { writeComposition(id: string, content: string): Promise<void> }).writeComposition(presetId, original)
+      } else {
+        await writeFile(preset.path, original, 'utf8')
+      }
+      return { ok: true, message: '预设 ' + presetId + ' 已取消：已恢复原始配置。' }
+    }
+  }
+  // No backup: reverse the in-place edit.
+  const text = await ap.read(presetId).catch(() => '')
+  const doc = parseDocument(text)
+  const js = doc.toJS() as unknown
+  const seq = Array.isArray(js) ? js : undefined
+  if (seq === undefined) return { ok: false, error: '预设结构无法解析，无法恢复' }
+  const kept: unknown[] = []
+  for (const row of seq) {
+    if (row && typeof row === 'object' && 'id' in row) {
+      const id = (row as { id?: unknown }).id
+      if (id === PIPELINE_ROW_ID) continue
+      if (id === BUILTIN_ROW_ID) delete (row as Record<string, unknown>).disabled
+    }
+    kept.push(row)
+  }
+  const rebuilt = new YAMLSeq<unknown>()
+  for (const entry of kept) rebuilt.add(doc.createNode(entry))
+  doc.contents = rebuilt as typeof doc.contents
+  const restored = doc.toString()
+  if ('writeComposition' in ctx) {
+    await (ctx as { writeComposition(id: string, content: string): Promise<void> }).writeComposition(presetId, restored)
+  } else {
+    await writeFile(preset.path, restored, 'utf8')
+  }
+  return { ok: true, message: '预设 ' + presetId + ' 已取消：已反向恢复。' }
 }

@@ -7,7 +7,7 @@
  *      scanParents   — every ancestor from cwd upward to filesystem root (mutually exclusive)
  *   3. scanGlobal    — user-global $DSH_HOME
  *
- * @module @sidleo3/instruction-scan/discovery
+ * @module @sidleo3/agent-instructions-plus/discovery
  */
 
 import { createHash } from 'node:crypto'
@@ -50,7 +50,12 @@ function readFileBounded(path: string, maxBytes: number): string | undefined {
 
 function isMarkerDir(path: string, markers: readonly string[]): boolean {
   for (const marker of markers) {
-    if (fileExists(join(path, marker))) return true
+    // A root marker may be a directory (e.g. `.git`) or a file (e.g.
+    // `pyproject.toml`); existence is what identifies the root, not type.
+    try {
+      const info = statSync(join(path, marker), { throwIfNoEntry: false })
+      if (info !== undefined) return true
+    } catch { /* keep looking */ }
   }
   return false
 }

@@ -1,7 +1,7 @@
 /**
  * Content identity for workspace instruction duplicate suppression.
  *
- * @module @sidleo3/instruction-scan/digest
+ * @module @sidleo3/agent-instructions-plus/digest
  */
 
 import { createHash } from 'node:crypto'

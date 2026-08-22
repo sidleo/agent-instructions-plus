@@ -1,6 +1,6 @@
 import { defineConfig } from 'tsdown'
 
-const PLUGIN_ID = '@sidleo3/instruction-scan'
+const PLUGIN_ID = '@sidleo3/agent-instructions-plus'
 /** Platform modules resolved from the DSH loader module table (external). */
 const EXTERNALS = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
@@ -12,7 +12,7 @@ const EXTERNALS = [
 ]
 
 /**
- * Build config for @sidleo3/instruction-scan.
+ * Build config for @sidleo3/agent-instructions-plus.
  *
  * Three outputs:
  *  - host   → lib/index.js  (ESM host entry: provider, RPC, GUI config)
@@ -23,7 +23,7 @@ const EXTERNALS = [
  */
 export default defineConfig([
   {
-    name: 'instruction-scan/host',
+    name: 'agent-instructions-plus/host',
     entry: { 'index': 'src/index.ts' },
     format: ['esm'],
     outDir: 'lib',
@@ -36,7 +36,7 @@ export default defineConfig([
     clean: false,
   },
   {
-    name: 'instruction-scan/preset',
+    name: 'agent-instructions-plus/preset',
     entry: { 'preset': 'src/preset.ts' },
     format: ['esm'],
     outDir: 'lib',
@@ -49,7 +49,7 @@ export default defineConfig([
     clean: false,
   },
   {
-    name: 'instruction-scan/client',
+    name: 'agent-instructions-plus/client',
     entry: { 'client': 'src/client/index.ts' },
     format: 'cjs',
     platform: 'browser',

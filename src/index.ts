@@ -1,18 +1,22 @@
 /**
- * instruction-scan Host entry — @sidleo3/instruction-scan
+ * agent-instructions-plus Host entry — @sidleo3/agent-instructions-plus
  *
  * A configurable instruction-file discovery provider for DeepSeek Harness.
- * Replaces the hardcoded discovery of `dsh-agent-instructions` with four
- * toggleable layers and user-editable candidates/markers.
- * Provides a browser-facing JSON RPC surface (config get/set, roots preview,
- * discovery debug).
+ * Replaces the hardcoded discovery of dsh-agent-instructions — but only in
+ * presets the USER explicitly enables. Installation changes nothing: this host
+ * entry registers only the provider and a browser-facing JSON RPC surface
+ * (config get/set, roots preview, discovery debug, preset takeover status and
+ * apply/remove). No preset is copied or modified until the user picks one in
+ * the GUI; removing a preset deletes the copy and restores the built-in
+ * agent-instructions row untouched.
  *
- * @module @sidleo3/instruction-scan
+ * @module @sidleo3/agent-instructions-plus
  */
 
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 import {
   DEFAULT_CONFIG,
   normalizeConfig,
@@ -24,7 +28,14 @@ import {
   scanDirectories,
   type DiscoveredFile,
 } from './discovery.ts'
-import { apply as applyInjectionPipeline } from './preset.ts'
+import {
+  applyPreset,
+  listPresets,
+  readTakeoverState,
+  removePreset,
+  type PresetStatus,
+  type TakeoverState,
+} from './wizard.ts'
 
 export type { InstructionScanConfig } from './config.ts'
 export { normalizeConfig, DEFAULT_CONFIG } from './config.ts'
@@ -46,8 +57,9 @@ export {
   type ReconciledInstructionContext,
 } from './state.ts'
 export { renderWorkspaceContext, renderInstructionChanges, candidateScopeKey, decodeScopeKey, instructionScopeKey, USER_GLOBAL_DIRECTORY, USER_GLOBAL_FILE, type RenderedWorkspaceContext, type AgentInstructionChange } from './render.ts'
+export { applyPreset, removePreset, listPresets, readTakeoverState, type PresetStatus, type TakeoverState } from './wizard.ts'
 
-export const name = 'instruction-scan'
+export const name = 'agent-instructions-plus'
 // Hard dependency on the browser HTTP carrier so the GUI config endpoints
 // are registered only after webServer is ready (same pattern as skill-scan).
 export const inject = ['webServer'] as const
@@ -90,16 +102,14 @@ export interface InstructionScanProvider {
 
 // ── Module-level singleton provider ─────────────────────────────────
 // Exported so agent-instructions (or any other consumer) can import
-// `getInstructionScanProvider()` to access the current provider instance
+// getInstructionScanProvider() to access the current provider instance
 // without needing Cordis context injection.
 
 let currentProvider: InstructionScanProvider | undefined
 
 /**
- * Get the current instruction-scan provider instance.
+ * Get the current agent-instructions-plus provider instance.
  * Returns undefined if the plugin has not yet been applied.
- * Agent-instructions should call this at discovery time to get the
- * latest config and discover files through the provider.
  */
 export function getInstructionScanProvider(): InstructionScanProvider | undefined {
   return currentProvider
@@ -113,9 +123,8 @@ export function apply(ctx: Context, config: InstructionScanConfig = DEFAULT_CONF
   let lastCwd: string | undefined
 
   // ── First-install config seed ───────────────────────────────────────
-  // The host-plane injection pipeline (mounted below) serves every preset,
-  // so no replacement preset is needed. On first activation with no disk
-  // config, seed a parents-mode default so the GUI toggle matches reality.
+  // Installed with zero side effects: no preset is copied or modified. Only a
+  // default config file is seeded so the GUI toggles match reality.
   const persisted = loadPersistedConfig(config.dshHome)
   if (persisted === undefined) {
     const seeded = normalizeConfig({ ...DEFAULT_CONFIG, scanProject: false, scanParents: true })
@@ -123,9 +132,37 @@ export function apply(ctx: Context, config: InstructionScanConfig = DEFAULT_CONF
     cfg = seeded
   }
 
+  // ── Settings namespace registration ─────────────────────────────
+  // Register the namespace our config card edits. DSH's configurable-plugins
+  // tab renders only cards whose key is a HOST-served settings namespace;
+  // registering here (like built-in theme/locale cards) keeps the card
+  // visible across DSH upgrades. The settings service is optional and may
+  // compose after this host apply, so declare the dependency via inject and
+  // register inside its callback (same pattern as @deepseek-ai/dsh-ui-theme).
+  ctx.inject(['settings'], (settingsCtx) => {
+    const settingsSvc = settingsCtx.get('settings') as
+      | { register(ns: string, schema: unknown): unknown }
+      | undefined
+    if (settingsSvc !== undefined) {
+      settingsSvc.register(
+        'agent-instructions-plus',
+        z.object({
+          scanCwd: z.boolean().default(true),
+          scanProject: z.boolean().default(false),
+          scanParents: z.boolean().default(true),
+          scanGlobal: z.boolean().default(true),
+          instructionFileCandidates: z.array(z.string()).default(['AGENTS.md', 'CLAUDE.md']),
+          localInstructionFileCandidates: z.array(z.string()).default(['AGENTS.local.md', 'CLAUDE.local.md']),
+          projectRootMarkers: z.array(z.string()).default(['.git']),
+          dshHome: z.string().default('~/.dsh'),
+        }),
+      )
+    }
+  })
+
   // ── Provider ────────────────────────────────────────────────────
   const provider: InstructionScanProvider = {
-    name: 'instruction-scan',
+    name: 'agent-instructions-plus',
     list(cwd: string, signal?: AbortSignal): DiscoveredFile[] {
       signal?.throwIfAborted()
       return discoverInstructionFiles(cfg, cwd, 1_048_576)
@@ -140,9 +177,8 @@ export function apply(ctx: Context, config: InstructionScanConfig = DEFAULT_CONF
 
   // ── HTTP RPC surface (formal-host path) ───────────────────────────
   // The web GUI card talks to the host over HTTP JSON endpoints (same
-  // mechanism as skill-scan). `harness.handle` is a DYNAMIC-plugin-only
-  // builtin and is NOT available to bundle-installed host halves, so the
-  // browser half must use fetch() against these routes, never host.call().
+  // mechanism as skill-scan). The browser half must use fetch() against
+  // these routes, never host.call().
   const webServer = ctx.get('webServer') as
     | { register(route: { kind: string; path: string; handler: (req: unknown, res: unknown) => void | Promise<void> }): () => void }
     | undefined
@@ -168,11 +204,11 @@ export function apply(ctx: Context, config: InstructionScanConfig = DEFAULT_CONF
   }
 
   if (webServer?.register) {
-    // GET /api/instruction-scan/config — current config
-    // POST /api/instruction-scan/config — save config
+    // GET /api/agent-instructions-plus/config — current config
+    // POST /api/agent-instructions-plus/config — save config
     webServer.register({
       kind: 'exact',
-      path: '/api/instruction-scan/config',
+      path: '/api/agent-instructions-plus/config',
       handler: async (req, res) => {
         const method = (req as { method?: string })?.method
         if (method === 'POST') {
@@ -188,27 +224,27 @@ export function apply(ctx: Context, config: InstructionScanConfig = DEFAULT_CONF
             return jsonError(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, error instanceof Error ? error.message : String(error))
           }
           persistConfig(cfg)
-          console.log('[instruction-scan] host: config saved:', JSON.stringify(cfg))
+          console.log('[agent-instructions-plus] host: config saved:', JSON.stringify(cfg))
           return jsonResponse(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, { ok: true, config: JSON.parse(JSON.stringify(cfg)) })
         }
         jsonResponse(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, JSON.parse(JSON.stringify(cfg)))
       },
     })
 
-    // GET /api/instruction-scan/roots — scan root directories for a cwd
+    // GET /api/agent-instructions-plus/roots — scan root directories for a cwd
     webServer.register({
       kind: 'exact',
-      path: '/api/instruction-scan/roots',
+      path: '/api/agent-instructions-plus/roots',
       handler: async (req, res) => {
         const cwd = resolveCwdFromHttp(req)
         jsonResponse(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, { cwd, roots: previewRoots(cfg, cwd) })
       },
     })
 
-    // GET /api/instruction-scan/discover — scan and list instruction files
+    // GET /api/agent-instructions-plus/discover — scan and list instruction files
     webServer.register({
       kind: 'exact',
-      path: '/api/instruction-scan/discover',
+      path: '/api/agent-instructions-plus/discover',
       handler: async (req, res) => {
         const cwd = resolveCwdFromHttp(req)
         const files = discoverInstructionFiles(cfg, cwd, 1_048_576)
@@ -226,10 +262,10 @@ export function apply(ctx: Context, config: InstructionScanConfig = DEFAULT_CONF
       },
     })
 
-    // GET /api/instruction-scan/scan-dirs — scan directory model
+    // GET /api/agent-instructions-plus/scan-dirs — scan directory model
     webServer.register({
       kind: 'exact',
-      path: '/api/instruction-scan/scan-dirs',
+      path: '/api/agent-instructions-plus/scan-dirs',
       handler: async (req, res) => {
         const cwd = resolveCwdFromHttp(req)
         jsonResponse(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, {
@@ -243,8 +279,72 @@ export function apply(ctx: Context, config: InstructionScanConfig = DEFAULT_CONF
         })
       },
     })
+
+    // ── Preset takeover management ─────────────────────────────────
+    // GET  /api/agent-instructions-plus/presets          — roster + enabled status
+    // POST /api/agent-instructions-plus/presets/apply    — enable takeover for one preset
+    // POST /api/agent-instructions-plus/presets/remove   — disable takeover for one preset
+    webServer.register({
+      kind: 'exact',
+      path: '/api/agent-instructions-plus/presets',
+      handler: async (req, res) => {
+        const presets: PresetStatus[] = await listPresets(ctx).catch((error: unknown) => {
+          console.error('[agent-instructions-plus] listPresets error:', error)
+          return []
+        })
+        jsonResponse(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, { presets })
+      },
+    })
+
+    webServer.register({
+      kind: 'exact',
+      path: '/api/agent-instructions-plus/presets/apply',
+      handler: async (req, res) => {
+        let parsed: { presetId?: string }
+        try {
+          parsed = JSON.parse(await readBodyLight(req as { on?: (event: 'data' | 'end' | 'error', cb: (chunk?: Buffer) => void) => void })) as { presetId?: string }
+        } catch {
+          return jsonError(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, 'invalid JSON body')
+        }
+        if (typeof parsed?.presetId !== 'string' || parsed.presetId.length === 0) {
+          return jsonError(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, 'presetId 必填')
+        }
+        const result = await applyPreset(ctx, parsed.presetId).catch((error: unknown) => {
+          console.error('[agent-instructions-plus] applyPreset threw:', error)
+          return { ok: false, error: 'applyPreset 异常: ' + (error instanceof Error ? error.message : String(error)), message: undefined }
+        })
+        if (!result.ok) {
+          return jsonError(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, result.error ?? '启用失败')
+        }
+        jsonResponse(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, { ok: true, message: result.message })
+      },
+    })
+
+    webServer.register({
+      kind: 'exact',
+      path: '/api/agent-instructions-plus/presets/remove',
+      handler: async (req, res) => {
+        let parsed: { presetId?: string }
+        try {
+          parsed = JSON.parse(await readBodyLight(req as { on?: (event: 'data' | 'end' | 'error', cb: (chunk?: Buffer) => void) => void })) as { presetId?: string }
+        } catch {
+          return jsonError(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, 'invalid JSON body')
+        }
+        if (typeof parsed?.presetId !== 'string' || parsed.presetId.length === 0) {
+          return jsonError(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, 'presetId 必填')
+        }
+        const result = await removePreset(ctx, parsed.presetId).catch((error: unknown) => {
+          console.error('[agent-instructions-plus] removePreset threw:', error)
+          return { ok: false, error: 'removePreset 异常: ' + (error instanceof Error ? error.message : String(error)), message: undefined }
+        })
+        if (!result.ok) {
+          return jsonError(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, result.error ?? '取消失败')
+        }
+        jsonResponse(res as { writeHead: (code: number, headers: Record<string, string>) => void; end: (body: string) => void }, { ok: true, message: result.message })
+      },
+    })
   } else {
-    console.log('[instruction-scan] webServer unavailable — GUI config endpoints disabled')
+    console.log('[agent-instructions-plus] webServer unavailable — GUI config endpoints disabled')
   }
 
   /** Resolve cwd from the request query string (?cwd=…), session state, or workspace registry fallback. */
@@ -282,12 +382,9 @@ export function apply(ctx: Context, config: InstructionScanConfig = DEFAULT_CONF
     }
   })
 
-  // ── Host-plane injection pipeline (all presets) ─────────────────
-  // Mount the workspace-instruction injection pipeline at HOST scope: an
-  // unscoped `ctx.on` listener is `hook.global`, so it receives `agent/pre-step`
-  // for EVERY agent regardless of preset. This makes instruction-scan effective
-  // in all modes (standard/liangshen/code/…) without copying or editing any
-  // preset. The pipeline replaces built-in agent-instructions messages in the
-  // inbox, so there is no duplicate injection.
-  applyInjectionPipeline(ctx, cfg)
+  // NOTE: no host-plane injection pipeline. Injection happens ONLY in presets
+  // the user explicitly enabled (each copy carries the /preset row). Installing
+  // or upgrading this bundle therefore changes nothing until the user picks
+  // presets in the GUI — and removing a preset restores the built-in
+  // agent-instructions untouched.
 }

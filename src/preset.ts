@@ -1,5 +1,5 @@
 /**
- * instruction-scan injection pipeline — @sidleo3/instruction-scan/preset
+ * agent-instructions-plus injection pipeline — @sidleo3/agent-instructions-plus/preset
  *
  * Session-plane entry, installed by the wizard into a copied agent preset next
  * to the disabled `agent-instructions` row. Replicates the dsh-agent-instructions
@@ -8,12 +8,11 @@
  * discovery, precedence, and budget follow the user-editable four-layer
  * configuration persisted by the host entry.
  *
- * @module @sidleo3/instruction-scan/preset
+ * @module @sidleo3/agent-instructions-plus/preset
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import { isDeepStrictEqual } from 'node:util'
-import { readFileSync } from 'node:fs'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
@@ -39,9 +38,10 @@ export { name }
 
 /**
  * Session-local persisted config, keyed by dsh home path.
- * Evaluated once per plugin activation (per preset generation), then cached:
- * the host entry owns GUI-driven updates and this entry only needs a stable
- * snapshot for baseline identity.
+ * Re-read on every injection with an mtime cache: the host entry writes GUI
+ * changes to disk, and a changed mtime invalidates the cache so the next
+ * pre-step composes with the new configuration. A changed config also changes
+ * the baseline identity, which triggers a baseline replacement automatically.
  */
 const CONFIG_FILENAME = 'dsh-instruction-scan.json'
 
@@ -50,12 +50,36 @@ function configPath(dshHome: string): string {
   return `${home}/${CONFIG_FILENAME}`
 }
 
-function loadPersistedConfig(cfg: InstructionScanConfig): InstructionScanConfig | undefined {
+let cachedConfig: { key: string; config: InstructionScanConfig } | undefined
+
+/**
+ * Read the persisted config through the ctx.fs service (the preset-row
+ * environment restricts node:fs synchronous reads; the built-in
+ * agent-instructions uses ctx.fs for the same reason). Re-reads on every
+ * call — the file is tiny — and caches only the last parsed value as a
+ * fast path for the common unchanged case. Falls back to the snapshot
+ * passed in when the file is unreadable.
+ * @param ctx - plugin context providing the fs service.
+ * @param fallback - the preset-row config snapshot to use when disk is unavailable.
+ */
+async function readConfigCached(
+  ctx: Context,
+  fallback: InstructionScanConfig,
+): Promise<InstructionScanConfig> {
   try {
-    const raw = readFileSync(configPath(cfg.dshHome), 'utf8')
-    return normalizeConfig(JSON.parse(raw))
+    const fileSystem = ctx.get('fs') as
+      | { resolve(path: string): Promise<unknown>; readText(target: unknown): Promise<string> }
+      | undefined
+    if (fileSystem === undefined) return fallback
+    const path = configPath(fallback.dshHome)
+    const target = await fileSystem.resolve(path)
+    const raw = await fileSystem.readText(target)
+    const config = normalizeConfig(JSON.parse(raw))
+    cachedConfig = { key: path, config }
+    return config
   } catch {
-    return undefined
+    // Fall back to the last cached value, then the preset-row snapshot.
+    return cachedConfig?.config ?? fallback
   }
 }
 
@@ -83,9 +107,11 @@ function isWorkspaceContext(message: UserMessage): boolean {
 
 /**
  * True when the message's source is OUR injection (carries the
- * `provider: instruction-scan` marker). The built-in dsh-agent-instructions
- * row injects with kind `agent-instructions` but no provider marker; we drop
- * those in pre-step to avoid duplicate workspace-instruction blocks.
+ * `provider: instruction-scan` marker — the literal is kept for
+ * compatibility with messages persisted by the old bundle). The built-in
+ * dsh-agent-instructions row injects with kind `agent-instructions` but no
+ * provider marker; we drop those in pre-step to avoid duplicate
+ * workspace-instruction blocks.
  */
 function isOwnInjection(message: UserMessage): boolean {
   const src = message.source as { provider?: unknown }
@@ -131,7 +157,9 @@ export function apply(ctx: Context, config: Partial<InstructionScanConfig> = {})
   // Persisted GUI config wins over the preset-row config; preset-row budget
   // defaults fill gaps (e.g. when the disk store predates maxBytes).
   const presetConfig = normalizeConfig({ ...DEFAULT_CONFIG, ...config })
-  const cfg = loadPersistedConfig(presetConfig) ?? presetConfig
+  // The persisted GUI config is read per-injection via ctx.fs (see
+  // readConfigCached); the preset-row config is only the fallback snapshot.
+  const fallbackConfig = presetConfig
   const instructionVersions: InstructionVersionCache = new WeakMap()
   const baselinePreparations = new WeakMap<Session, {
     identity: string
@@ -142,10 +170,10 @@ export function apply(ctx: Context, config: Partial<InstructionScanConfig> = {})
   const executionTouches = new Map<ToolExecutionToken, ProjectionTouch[]>()
   ctx.effect(
     () => () => {
-      projectionLifecycle.abort(new Error('instruction-scan disposed'))
+      projectionLifecycle.abort(new Error('agent-instructions-plus disposed'))
       executionTouches.clear()
     },
-    'instruction-scan.projectionLifecycle',
+    'agent-instructions-plus.projectionLifecycle',
   )
   // Emit listeners are not awaited, so each projection must compose against the
   // inbox produced by earlier file results for the same agent.
@@ -161,6 +189,9 @@ export function apply(ctx: Context, config: Partial<InstructionScanConfig> = {})
     touchedPaths: readonly string[] = [],
   ): Promise<UserMessage | undefined> => {
     signal.throwIfAborted()
+    // Re-read the persisted config per injection via ctx.fs. A GUI change
+    // therefore takes effect on the very next pre-step, no restart needed.
+    const cfg = await readConfigCached(ctx, fallbackConfig)
     if (cfg.maxBytes <= 0 || !Number.isFinite(cfg.maxBytes)) {
       return undefined
     }

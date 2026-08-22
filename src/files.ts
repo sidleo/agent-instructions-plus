@@ -5,7 +5,7 @@
  * module offers the per-candidate stat/read primitives the reconciliation
  * pipeline and baseline loading share.
  *
- * @module @sidleo3/instruction-scan/files
+ * @module @sidleo3/agent-instructions-plus/files
  */
 
 import { createReadStream } from 'node:fs'

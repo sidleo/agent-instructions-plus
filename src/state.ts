@@ -1,7 +1,7 @@
 /**
  * Session-visible workspace instruction state and dynamic reconciliation.
  *
- * @module @sidleo3/instruction-scan/state
+ * @module @sidleo3/agent-instructions-plus/state
  */
 
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -40,7 +40,7 @@ export interface AgentInstructionSource {
   form: 'instructions'
   /** Marks the complete startup/resume baseline rather than a later delta. */
   baseline?: true
-  /** Marks injection by instruction-scan (as opposed to the built-in provider). */
+  /** Marks injection by agent-instructions-plus (as opposed to the built-in provider). */
   provider?: 'instruction-scan'
   /** Discovery, precedence, and budget identity used to validate a resumed baseline. */
   baselineIdentity?: string

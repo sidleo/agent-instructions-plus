@@ -1,14 +1,15 @@
 {
-  "name": "@sidleo3/instruction-scan",
+  "name": "@sidleo3/agent-instructions-plus",
   "version": "0.2.2",
-  "description": "Configurable AGENTS.md file discovery provider for DSH: scan cwd / project / ancestors / global, editable candidates and project-root markers, replacing hardcoded discovery in dsh-agent-instructions.",
+  "description": "agent-instructions-plus: preset 选择性接管 AGENTS.md 注入，安装零改动，取消即恢复内置 agent-instructions。",
   "keywords": [
     "deepseek-harness",
     "dsh",
     "agents-md",
     "instruction",
     "plugin",
-    "agent-instructions"
+    "agent-instructions",
+    "agent-instructions-plus"
   ],
   "license": "MIT",
   "type": "module",
@@ -84,5 +85,9 @@
     "react": "^18.3.1",
     "tsdown": "0.22.2",
     "typescript": "~5.7.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sidleo/instruction-scan.git"
   }
 }

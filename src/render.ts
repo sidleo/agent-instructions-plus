@@ -1,7 +1,7 @@
 /**
  * Model-facing workspace instruction rendering within an explicit byte budget.
  *
- * @module @sidleo3/instruction-scan/render
+ * @module @sidleo3/agent-instructions-plus/render
  */
 
 import { basename, dirname } from 'node:path'
