@@ -375,8 +375,6 @@ export async function reconcileInstructionContext(
     else directoryScopes.push(scope)
   }
 
-  const globalDisplayBase = dirsByScope.get(USER_GLOBAL_DIRECTORY)?.dir
-
   for (const [directory, directoryScopes] of scopesByDirectory) {
     const entry = dirsByScope.get(directory)
     if (entry === undefined) continue
@@ -427,8 +425,12 @@ export async function reconcileInstructionContext(
       if (seenAbsolutePaths.has(absolutePath)) continue
       seenAbsolutePaths.add(absolutePath)
       addedAbsolutePaths.push(absolutePath)
-      const displayPath = directory === USER_GLOBAL_DIRECTORY && globalDisplayBase !== undefined
-        ? relativeDisplay(globalDisplayBase, absolutePath)
+      // user-global must use the same display path as the baseline loader
+      // (userGlobalDisplayPath -> dshHome/AGENTS.md); a relative path here
+      // would never match the baseline's path and every reconcile pass would
+      // emit a spurious replace for an unchanged file.
+      const displayPath = directory === USER_GLOBAL_DIRECTORY
+        ? config.dshHome + '/AGENTS.md'
         : relativeDisplay(entry.displayBase, absolutePath) || candidateName
       const cached = versions.get(scope)
       if (
