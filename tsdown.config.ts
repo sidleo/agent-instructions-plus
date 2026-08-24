@@ -10,6 +10,25 @@ const EXTERNALS = [
   '@deepseek-ai/dsh-client-ui-attachment',
   '@deepseek-ai/dsh-client-schema-form',
 ]
+/**
+ * Peer/runtime dependencies provided by the DSH loader at runtime (external
+ * in the host/preset bundles). Everything else — including
+ * `@deepseek-ai/schemastery` and its vendored `@deepseek-ai/cosmokit`
+ * dependency — must be BUNDLED, because the DSH loader does not expose them
+ * as importable modules: an external `import z from
+ * '@deepseek-ai/schemastery'` fails at runtime with ERR_MODULE_NOT_FOUND.
+ */
+const RUNTIME_EXTERNALS = [
+  ...EXTERNALS,
+  'yaml',
+  '@deepseek-ai/dsh-llm',
+  '@deepseek-ai/dsh-agent',
+  '@deepseek-ai/dsh-fs',
+  '@deepseek-ai/dsh-session',
+  '@deepseek-ai/dsh-tools',
+  '@deepseek-ai/dsh-home-paths',
+  '@deepseek-ai/dsh-client-runtime',
+]
 
 /**
  * Build config for @sidleo3/agent-instructions-plus.
@@ -34,6 +53,8 @@ export default defineConfig([
     dts: { minify: false },
     sourcemap: true,
     clean: false,
+    external: [...RUNTIME_EXTERNALS],
+    noExternal: (id) => (RUNTIME_EXTERNALS.includes(id) ? undefined : true),
   },
   {
     name: 'agent-instructions-plus/preset',
@@ -47,6 +68,8 @@ export default defineConfig([
     dts: { minify: false },
     sourcemap: true,
     clean: false,
+    external: [...RUNTIME_EXTERNALS],
+    noExternal: (id) => (RUNTIME_EXTERNALS.includes(id) ? undefined : true),
   },
   {
     name: 'agent-instructions-plus/client',
