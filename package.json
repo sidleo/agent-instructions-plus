@@ -1,6 +1,6 @@
 {
   "name": "@sidleo3/agent-instructions-plus",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "agent-instructions-plus: preset 选择性接管 AGENTS.md 注入，安装零改动，取消即恢复内置 agent-instructions。",
   "keywords": [
     "deepseek-harness",
