@@ -79,15 +79,15 @@ DSH 0.1.7 起，`@deepseek-ai/dsh-agent-preset-registry` **不再扫描 `~/.dsh/
 ## Development
 
 ```bash
-pnpm build        # tsdown → lib/index.js + lib/preset.js + lib/client.js
-pnpm typecheck    # tsc --noEmit
+pnpm install --ignore-scripts   # 无特殊 flag
+pnpm build                      # tsdown → lib/index.js + lib/preset.js + lib/client.js
+pnpm typecheck                  # 期望 0 错误
 ```
 
-> `pnpm install` 会因未发布的私有包 404。必须显式带 `--config.auto-install-peers=false`（`.npmrc` 单独设置无效：lockfile 里的 `settings.autoInstallPeers: true` 优先级更高）：
-> ```bash
-> pnpm install --ignore-scripts --config.auto-install-peers=false
-> ./node_modules/.bin/tsdown       # 直接调用本地二进制
-> ```
+> `@deepseek-ai/dsh-*` 与 `@deepseek-ai/cordis` 只存在于 DSH 安装里（npm 上只有过期的 `rc`），
+> 因此本项目**不把它们写进依赖声明** —— 写了会让 `pnpm install` / `npm install` 去 registry
+> 拉不存在的版本而失败。类型改由 `scripts/resolve-dsh-types.mjs` 从运行中的 DSH 解析
+> （`pnpm typecheck` 会自动先跑它）；换 DSH 安装后 `pnpm resolve-types` 重跑即可。
 
 ## Notes
 

@@ -1,6 +1,6 @@
 {
   "name": "@sidleo3/agent-instructions-plus",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "agent-instructions-plus: preset 选择性接管 AGENTS.md 注入，安装零改动，取消即恢复内置 agent-instructions。",
   "keywords": [
     "deepseek-harness",
@@ -55,31 +55,24 @@
     "verifyDepsBeforeRun": false
   },
   "scripts": {
+    "resolve-types": "node scripts/resolve-dsh-types.mjs",
     "build": "tsdown",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node scripts/resolve-dsh-types.mjs && tsc --noEmit",
     "clean": "rm -rf lib",
     "prepack": "pnpm build"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "^0.1.7-alpha.2",
-    "@deepseek-ai/dsh-fs": "^0.1.7-alpha.2",
-    "@deepseek-ai/dsh-llm": "^0.1.7-alpha.2",
-    "@deepseek-ai/dsh-session": "^0.1.7-alpha.2",
-    "@deepseek-ai/dsh-tools": "^0.1.7-alpha.2",
-    "@deepseek-ai/dsh-home-paths": "^0.1.7-alpha.2",
-    "@deepseek-ai/dsh-client-runtime": "^0.1.7-alpha.2",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-alpha.2",
     "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
   },
   "dependencies": {
     "yaml": "^2.6.0"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-home-paths": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.7",
-    "@deepseek-ai/dsh-client-ui-slots": "0.1.0-rc.7",
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.1",
     "react": "^18.3.1",

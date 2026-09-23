@@ -1,4 +1,5 @@
 {
+  "extends": "./.dsh-types/tsconfig.paths.json",
   "compilerOptions": {
     "target": "ES2023",
     "module": "ESNext",

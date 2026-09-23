@@ -36,30 +36,47 @@
 ## 构建与发布
 
 ```bash
-# ⚠️ 必须带 --config.auto-install-peers=false（原因见下）
-pnpm install --ignore-scripts --config.auto-install-peers=false
-./node_modules/.bin/tsdown      # → lib/index.js + lib/preset.js + lib/client.js
-./node_modules/.bin/tsc --noEmit
+pnpm install --ignore-scripts    # 无特殊 flag，已不再 404
+pnpm build                       # tsdown → lib/index.js + lib/preset.js + lib/client.js
+pnpm typecheck                   # 先跑 resolve-types，再 tsc --noEmit（期望 0 错误）
 ```
 
-> ⚠️ **构建环境**：`pnpm install` 会去 registry 拉未发布的私有包（`@deepseek-ai/dsh-type-meta` 等）而 404。**光靠 `.npmrc` 的 `auto-install-peers=false` 不够** —— 提交在库里的 `pnpm-lock.yaml` 里写着 `settings.autoInstallPeers: true`，lockfile 的 settings 会覆盖 `.npmrc`。因此必须显式传 `--config.auto-install-peers=false`（命令行的优先级最高）。
+> **依赖声明的原则**：只声明 `node_modules` 里能解析到的东西。`@deepseek-ai/dsh-*` / `@deepseek-ai/cordis`
+> 在 npm 上只有过期的 `rc` 版本（DSH 实际用的是 `0.1.7-alpha.2`，从未发布），**不能**写进
+> `devDependencies` 或 `peerDependencies` —— 写了就会让 `pnpm install` / `npm install` 去 registry
+> 拉不存在的版本而失败，或把 `@deepseek-ai/*` 的 peer 冲突子树拖进来。
 >
-> `tsc --noEmit` 会有约 28 条 `Cannot find module '@deepseek-ai/dsh-llm'` 一类错误 —— 这些包是 DSH **运行时**注入的，本地没有类型声明，属**已知既有噪音**，不是回归。判断有无回归的办法：`git stash` 后跑一次基线，比对"按文件归一化后的错误集合"，新增项才算问题。
+> - 类型从**运行时安装**里取：`scripts/resolve-dsh-types.mjs` 用 `DSH_PROFILE_DIR`（回退到本包）解析
+>   各包的 `lib/types/index.d.ts`，写入 gitignore 的 `.dsh-types/tsconfig.paths.json`，由 `tsconfig.json` extends。
+>   换 DSH 安装后重跑 `pnpm resolve-types` 即可。
+> - 运行时真的需要的（`yaml`）放 `dependencies`；`react` 是 DSH loader 提供的平台模块，放
+>   `peerDependenciesMeta` 标 `optional` 以免拖拽安装。
 
 ### 发布 npm
 
 ```bash
 npm version patch --no-git-tag-version
-npm publish --ignore-scripts     # 必须 --ignore-scripts：prepack 会触发 pnpm build → 404
+npm publish --ignore-scripts     # 必须 --ignore-scripts：prepack 会触发 pnpm build
 ```
 
-构建产物的三条校验（发布前必看）：
+构建产物的四条校验（发布前必看）：
 
 ```bash
-grep -cE '^import .*schemastery' lib/index.js        # 期望 0（必须内联，见坑点 3）
+grep -cE '^import .*schemastery' lib/index.js         # 期望 0（必须内联，见坑点 3）
 head -c 60 lib/client.js | grep -c '__ModuleLoader__' # 期望 1（client 必须是 CJS factory 包装）
 grep -c 'plugins.bundle.config' lib/client.js         # 期望 >=1（注册到新槽位）
+grep -c 'kind: "plugin"' lib/index.js                 # 期望 0（旧 source kind 已从 0.1.7 移除）
 ```
+
+发布后验证安装（**不要只看 publish 成功**）：
+
+```bash
+mkdir /tmp/v && cd /tmp/v && npm init -y
+npm install @sidleo3/agent-instructions-plus@<ver> --ignore-scripts   # 必须成功，不能 ERESOLVE
+```
+
+> npm 的 tarball 传播可能滞后几分钟：`npm view <pkg>@<ver>` 已返回 200 时，tarball 仍可能 404。
+> 用 `curl -o /dev/null -w '%{http_code}' <tarball-url>` 轮询确认 200 再判断发布结果。
 
 ## ⚠️ 关键坑点（踩过）
 
@@ -92,6 +109,24 @@ profile patch 被多个插件共用（本机就有 `BEGIN/END yh-bigdata-mcp (ma
 ### 6. `config:` 子块的缩进层级
 
 shipped patch 里插件行的缩进是：`plugins:`(4) → 行 opener(6) → 行内 key(8) → `config:` 的 body(10)。`composition.ts` 把 body 去缩进到列 0 后，`wizard.ts` 必须按 `行缩进+2` 重新缩进 body。缩进错位生成的 YAML 仍能解析，但 `config` 会挂到错误的层级 —— **必须用 `parseDocument(...).toJS()` 断言结构**，只比字符串看不出来。
+
+### 7. 消息 source 的 `kind` 在 0.1.7 变了
+
+注入消息的 `source` 必须用 `kind: 'agent-instructions'` + `form: 'instructions'`，**旧的 `kind: 'plugin'` 已从联合类型中移除**。这个联合由 `dsh-agent-instructions` 通过 `declare module '@deepseek-ai/dsh-llm'` 增强而来，所以自己写 augmentation 时必须与它一致（`state.ts` 里已有 `AgentInstructionSource` + augmentation）。
+
+我们的额外标记是 `provider: 'instruction-scan'`：pre-step 的 `isOwnInjection()` 靠它区分"本插件的注入"与"内置注入"，去掉它会导致重复注入。改这个结构前先确认这三处仍匹配：`isOwnInjection`、`isWorkspaceContextSource`、`sameContextPayload`。
+
+### 8. 枚举会话事件要走 `surface.nodes` + `eventAt`
+
+`session.snapshotEvents()` 返回的是**数组**（每个事件自带 `.seq`），不是带数字键的 Map —— 对它调 `.entries()` 会得到 `[index, event]`，下标被当成 `seq` 用，类型上会报 `number` 不能赋给 `SessionSeq`。
+
+要"只看当前可见的事件"，正确做法是遍历 `session.surface.nodes`（本身就是 `readonly SessionSeq[]`）再 `session.eventAt(seq)`，与内置 `dsh-agent-instructions` 的写法一致。
+
+### 9. 类型噪音会掩盖真错误
+
+`@deepseek-ai/dsh-*` 的类型缺失时，`tsc` 会对每个用到它们的符号报 `Cannot find module` / 隐式 `any`，**把这些文件里的真实类型错误一起淹掉**。本仓库曾长期有 28 条噪音，接上真类型（见"构建与发布"）后立刻暴露出 2 个真 bug（坑点 7、8）。
+
+结论：不要把这类噪音当"已知背景"接受。判断有无回归不要只比错误条数，要**接上真类型把错误清零**。
 
 ## 运行时架构速览
 

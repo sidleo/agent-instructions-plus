@@ -96,7 +96,18 @@ function workspaceContextHook(text: string, changes: AgentInstructionChange[]): 
 export function workspaceContextMessage(text: string): Message {
   return createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: name, provider: 'instruction-scan' },
+    // The 0.1.7 source union has no `plugin` member: an injected workspace
+    // context is attributed to the `agent-instructions` producer with the
+    // `instructions` form, which is also what the built-in provider uses.
+    // `provider` is our own extra marker, carried so pre-step can tell our
+    // injection from the built-in one.
+    source: {
+      kind: 'agent-instructions',
+      form: 'instructions',
+      baseline: true,
+      provider: 'instruction-scan',
+      changes: [],
+    },
   })
 }
 
@@ -140,13 +151,14 @@ function visibleInstructionChanges(
   agent: Agent,
   authorityMessages: readonly UserMessage[],
 ): Map<string, AgentInstructionChange> {
-  const visibleSeqs = new Set(agent.session.surface.nodes)
   const visible = new Map<string, AgentInstructionChange>()
-  for (const [seq, event] of agent.session.snapshotEvents().entries()) {
-    if (event.type !== 'user/message' || !isWorkspaceContextSource(event.data.source)) continue
-    const changes = workspaceInstructionChanges(event.data.source)
-    for (const change of changes) {
-      if (visibleSeqs.has(seq)) visible.set(change.scope, change)
+  // `surface.nodes` already enumerates the visible sequence numbers, so walk
+  // that and read each event by seq — same pattern as the built-in provider.
+  for (const seq of agent.session.surface.nodes) {
+    const event = agent.session.eventAt(seq)
+    if (event?.type !== 'user/message' || !isWorkspaceContextSource(event.data.source)) continue
+    for (const change of workspaceInstructionChanges(event.data.source)) {
+      visible.set(change.scope, change)
     }
   }
   for (const message of authorityMessages) {
