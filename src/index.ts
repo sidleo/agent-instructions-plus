@@ -6,9 +6,13 @@
  * presets the USER explicitly enables. Installation changes nothing: this host
  * entry registers only the provider and a browser-facing JSON RPC surface
  * (config get/set, roots preview, discovery debug, preset takeover status and
- * apply/remove). No preset is copied or modified until the user picks one in
- * the GUI; removing a preset deletes the copy and restores the built-in
- * agent-instructions row untouched.
+ * apply/remove). No preset is touched until the user picks one in the GUI;
+ * enabling a preset writes a `preset-<id>` override row into the profile's
+ * `cordis.patch.yml`, and disabling removes exactly that row.
+ *
+ * Takeover targets the profile patch because DSH 0.1.7 no longer scans an
+ * `agent-presets` directory: presets are declarative `@deepseek-ai/dsh-agent-preset`
+ * Loader rows, and overriding a shipped one is a bundle patch.
  *
  * @module @sidleo3/agent-instructions-plus
  */
@@ -16,7 +20,6 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import z from '@deepseek-ai/schemastery'
 import {
   DEFAULT_CONFIG,
   normalizeConfig,
@@ -57,7 +60,8 @@ export {
   type ReconciledInstructionContext,
 } from './state.ts'
 export { renderWorkspaceContext, renderInstructionChanges, candidateScopeKey, decodeScopeKey, instructionScopeKey, USER_GLOBAL_DIRECTORY, USER_GLOBAL_FILE, type RenderedWorkspaceContext, type AgentInstructionChange } from './render.ts'
-export { applyPreset, removePreset, listPresets, readTakeoverState, type PresetStatus, type TakeoverState } from './wizard.ts'
+export { applyPreset, removePreset, listPresets, readTakeoverState, ownedPatchRowId, type PresetStatus, type TakeoverState, type PresetCompositionRow } from './wizard.ts'
+export { listPresetCompositions, parseShippedComposition } from './composition.ts'
 
 export const name = 'agent-instructions-plus'
 // Hard dependency on the browser HTTP carrier so the GUI config endpoints
@@ -131,34 +135,6 @@ export function apply(ctx: Context, config: InstructionScanConfig = DEFAULT_CONF
     persistConfig(seeded)
     cfg = seeded
   }
-
-  // ── Settings namespace registration ─────────────────────────────
-  // Register the namespace our config card edits. DSH's configurable-plugins
-  // tab renders only cards whose key is a HOST-served settings namespace;
-  // registering here (like built-in theme/locale cards) keeps the card
-  // visible across DSH upgrades. The settings service is optional and may
-  // compose after this host apply, so declare the dependency via inject and
-  // register inside its callback (same pattern as @deepseek-ai/dsh-ui-theme).
-  ctx.inject(['settings'], (settingsCtx) => {
-    const settingsSvc = settingsCtx.get('settings') as
-      | { register(ns: string, schema: unknown): unknown }
-      | undefined
-    if (settingsSvc !== undefined) {
-      settingsSvc.register(
-        'agent-instructions-plus',
-        z.object({
-          scanCwd: z.boolean().default(true),
-          scanProject: z.boolean().default(false),
-          scanParents: z.boolean().default(true),
-          scanGlobal: z.boolean().default(true),
-          instructionFileCandidates: z.array(z.string()).default(['AGENTS.md', 'CLAUDE.md']),
-          localInstructionFileCandidates: z.array(z.string()).default(['AGENTS.local.md', 'CLAUDE.local.md']),
-          projectRootMarkers: z.array(z.string()).default(['.git']),
-          dshHome: z.string().default('~/.dsh'),
-        }),
-      )
-    }
-  })
 
   // ── Provider ────────────────────────────────────────────────────
   const provider: InstructionScanProvider = {
