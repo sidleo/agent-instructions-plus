@@ -203,6 +203,7 @@ export async function listPresets(ctx: WizardContext): Promise<PresetStatus[]> {
   if (ap === undefined) return []
   const presets = await ap.list()
   const compositions = await listPresetCompositions(ctx)
+  const declarations = await listPresetDeclarations(ctx)
   const out: PresetStatus[] = []
   for (const p of presets) {
     const composition = compositions.get(p.id)
@@ -210,10 +211,15 @@ export async function listPresets(ctx: WizardContext): Promise<PresetStatus[]> {
     // builtin agent-instructions row; the patch only says whether we took over.
     const shippedHasBuiltin = composition?.some(row => row.id === BUILTIN_ROW_ID) ?? false
     const takeover = await readTakeoverState(ctx, p.id)
+    const declared = declarations.get(p.id)
+    // A shipped preset declares no name, so the roster echoes its raw id there
+    // and only the declared text is real display text. Prefer the declaration,
+    // but never hand the client an id dressed up as a name.
+    const declaredName = declared?.name ?? p.name
     out.push({
       id: p.id,
-      name: p.name ?? p.id,
-      description: p.description,
+      name: declaredName === undefined || declaredName === p.id ? p.id : declaredName,
+      description: declared?.description ?? p.description,
       trust: p.trust ?? 'shipped',
       backupExists: takeover.backupExists,
       pipelineActive: takeover.pipelineActive,

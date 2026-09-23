@@ -83,12 +83,16 @@ export function apply(ctx) {
   }
 
   /**
-   * Display names for DSH's built-in presets.
+   * Fallback display names for DSH's BUILT-IN presets.
    *
-   * The roster reports the raw id (`standard`, `ptc`, …) — the shipped
-   * declarations carry no `name` field. DSH's own preset picker localizes them
-   * through `BUILT_IN_PRESET_KEYS` in `@deepseek-ai/dsh-client-ui-agent-preset`,
-   * whose zh dictionary these strings match, so the two surfaces agree.
+   * The shipped declarations carry no `name` field, so the roster reports the
+   * raw id for them and the host cannot supply display text. DSH's own preset
+   * picker localizes them through `BUILT_IN_PRESET_KEYS` in
+   * `@deepseek-ai/dsh-client-ui-agent-preset`; these strings match its zh
+   * dictionary so the two surfaces agree.
+   *
+   * A CUSTOM preset declares its own name/description, and the host reports
+   * those — they always win over this table (see `presetName`).
    */
   const PRESET_NAMES = {
     standard: '标准模式',
@@ -97,7 +101,7 @@ export function apply(ctx) {
     cordis: '创造模式',
   }
 
-  /** One-line descriptions, matching DSH's zh dictionary. */
+  /** One-line descriptions for the built-ins, matching DSH's zh dictionary. */
   const PRESET_DESCRIPTIONS = {
     standard: '处理代码、文件和资料，适合大多数任务。Agent 会按需使用检索、编辑和终端等工具。',
     ptc: '包含标准模式的所有能力，更适合批量调用工具，并对结果进行筛选、整理、去重、统计或汇总的任务。',
@@ -105,10 +109,29 @@ export function apply(ctx) {
     cordis: '用对话定制 DSH：让 Agent 编写插件，添加新功能或界面；也能组合工具和提示词，创建自己的模式。',
   }
 
-  /** `标准模式（standard）` — localized name, falling back to the raw id. */
-  function presetLabel(id) {
-    const name = PRESET_NAMES[id]
-    return name === undefined ? id : name + '（' + id + '）'
+  /**
+   * The display name for one preset.
+   *
+   * A custom preset's declared name is authoritative; the built-in table only
+   * fills the gap for DSH's shipped presets, which declare none. When neither
+   * exists the raw id is the name, with no redundant `（id）` suffix.
+   */
+  function presetName(preset) {
+    const declared = typeof preset.name === 'string' ? preset.name.trim() : ''
+    const known = PRESET_NAMES[preset.id]
+    // An id echoed back as the name is not display text: a shipped preset
+    // declares no name, so the host reports its id there and the localized
+    // table is the only real name we have.
+    const usable = declared.length > 0 && declared !== preset.id ? declared : undefined
+    const display = usable ?? known
+    if (display === undefined) return preset.id
+    return display === preset.id ? display : display + '（' + preset.id + '）'
+  }
+
+  /** The description to show: the preset's own, else the built-in table. */
+  function presetDescription(preset) {
+    const declared = typeof preset.description === 'string' ? preset.description.trim() : ''
+    return declared.length > 0 ? declared : (PRESET_DESCRIPTIONS[preset.id] || '')
   }
 
   function AgentInstructionsPlusPage() {
@@ -229,8 +252,8 @@ export function apply(ctx) {
         return h('div', { key: p.id, className: 'aipPresetRow' },
           h('input', { type: 'checkbox', className: 'aipCheckbox', checked: !!p.enabled, disabled: busy, onChange: function (e) { togglePreset(p.id, e.target.checked) } }),
           h('div', { className: 'aipPresetBody' },
-            h('div', { className: 'aipPresetName' }, presetLabel(p.id)),
-            h('div', { className: 'aipPresetDesc' }, PRESET_DESCRIPTIONS[p.id] || ''),
+            h('div', { className: 'aipPresetName' }, presetName(p)),
+            h('div', { className: 'aipPresetDesc' }, presetDescription(p)),
             h('span', { className: 'aipTag ' + (p.enabled ? 'aipTagOn' : 'aipTagOff') },
               p.enabled ? '● 已接管' : '○ 内置注入')))
       })
@@ -241,7 +264,7 @@ export function apply(ctx) {
       ? h('div', { className: 'aipHint' }, '未找到含 agent-instructions 行的内置预设，或 agentPresets 服务不可用。')
       : null
     var skippedHint = skipped.length > 0
-      ? h('div', { className: 'aipHint' }, '未列出：' + skipped.map(function (p) { return presetLabel(p.id) }).join('、') + '（不含 agent-instructions 行，无需接管）')
+      ? h('div', { className: 'aipHint' }, '未列出：' + skipped.map(function (p) { return presetName(p) }).join('、') + '（不含 agent-instructions 行，无需接管）')
       : null
 
     return h('div', { className: busy ? 'aipBusy' : '' },

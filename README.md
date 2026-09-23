@@ -10,6 +10,45 @@
 - **取消即恢复**：取消勾选**行级**移除自己那段覆盖行，其他插件的 patch 段逐字节不变，`agent-instructions` 恢复工作
 - **不生效的 preset 不受影响**：未勾选的 preset 完全保持内置行为
 
+## 与内置 `agent-instructions` 的区别
+
+两者**运行时骨架同源**：同一套「首个 pre-step 合成 baseline → `tools/result` 的 read/write/edit 冒泡 touches → 增量 reconcile → digest 去重」机制，配置字段也基本一一对应。真正的分歧只有一处 —— **向上扫描在哪里停**。
+
+| 维度 | `agent-instructions`（内置） | `agent-instructions-plus`（本插件） |
+|---|---|---|
+| **生效范围** | 所有 preset 无条件生效 | **仅用户勾选的 preset**，其余完全保持内置行为 |
+| **向上扫描** | 只到 project root（`.git` 标记的祖先）为止 | `scanProject`（同内置）**或** `scanParents`（一路到 `/`），二选一 |
+| cwd 自身 | 含在 root→cwd 链里 | `scanCwd` 独立开关 |
+| 全局层 | `$DSH_HOME/AGENTS.md` 固定加载 | `scanGlobal` 独立开关 |
+| 候选文件名 / 项目根标记 / 字节预算 | `instructionFileCandidates`、`localInstructionFileCandidates`、`projectRootMarkers`、`maxBytes`、`maxSourceBytes` | **同名同义** |
+| 刷新触发 / 去重 / baseline 身份 | `tools/result` → 增量 reconcile；SHA-1 digest + 逐目录去重 | 同机制（管线是对内置语义的复刻） |
+| 配置入口 | preset 行的 `config` | Web GUI 配置页（写 `cordis.patch.yml` 覆盖行） |
+
+### scanParents 解决什么
+
+设仓库在 `/Users/me/Project/repo`，而 `/Users/me/AGENTS.md` 也写了规则：
+
+- **内置**：在 `repo/.git` 找到项目根就停 → **`/Users/me/AGENTS.md` 读不到**
+- **`scanParents`**：一路扫到 `/` → 每一层的 `AGENTS.md` 都能读到
+
+内置的取舍是有意为之：root 探测只在确认标记缺失时才继续向上，遇到权限/IO 错误会**停止并报错**，而不是改选另一个祖先当根 —— 避免把 `/` 或 `$HOME` 误判成项目根、注入无关内容。本插件只是把这个选择权交给你（详见 `@deepseek-ai/dsh-agent-instructions` 的 README「Root discovery」段）。
+
+### 什么时候不需要本插件
+
+如果只想要**改候选名或 `maxBytes`**，内置的 `config` 已经支持，直接写 preset 行即可 —— 不必引入本插件：
+
+```yaml
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+    instructionFileCandidates: [AGENTS.md, CLAUDE.md, CODEBUDDY.md]
+```
+
+**只有需要 `scanParents`（跨 git 仓库向上读）或 `scanCwd` / `scanGlobal` 的独立开关时，本插件才不可替代。**
+
+> ⚠️ 代价：本插件的注入管线是对内置语义的**复刻而非复用**。DSH 修改内置机制时本插件不会自动跟上，需要人工同步（参见 `AGENTS.md` 坑点 7/8/9 —— 那两个真 bug 就是复刻漂移的结果）。
+
 ## Features
 
 - **Four scanning layers**: cwd (highest) → project/parents (mutually exclusive) → global (lowest)
