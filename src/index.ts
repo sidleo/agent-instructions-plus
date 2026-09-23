@@ -61,7 +61,7 @@ export {
 } from './state.ts'
 export { renderWorkspaceContext, renderInstructionChanges, candidateScopeKey, decodeScopeKey, instructionScopeKey, USER_GLOBAL_DIRECTORY, USER_GLOBAL_FILE, type RenderedWorkspaceContext, type AgentInstructionChange } from './render.ts'
 export { applyPreset, removePreset, listPresets, readTakeoverState, ownedPatchRowId, type PresetStatus, type TakeoverState, type PresetCompositionRow } from './wizard.ts'
-export { listPresetCompositions, parseShippedComposition } from './composition.ts'
+export { listPresetCompositions, parsePresetComposition } from './composition.ts'
 
 export const name = 'agent-instructions-plus'
 // Hard dependency on the browser HTTP carrier so the GUI config endpoints

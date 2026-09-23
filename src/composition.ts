@@ -1,64 +1,109 @@
 /**
- * Shipped-preset composition reader — @sidleo3/agent-instructions-plus
+ * Preset composition reader — @sidleo3/agent-instructions-plus
  *
- * DSH ships each built-in agent preset as a bundle patch file
- * (`@deepseek-ai/dsh-web-app/presets/<id>.patch.yml`), declaring one
- * `@deepseek-ai/dsh-agent-preset` row with a `plugins:` list. Overriding a
- * preset now means replacing that whole list from the profile patch, so the
- * takeover needs the shipped rows verbatim — including their `!!js` custom tags.
+ * An agent preset is a declarative `@deepseek-ai/dsh-agent-preset` Loader row
+ * carrying a `plugins:` list. Those rows come from ANY bundle layer:
+ * DSH ships its built-ins as `@deepseek-ai/dsh-web-app/presets/<id>.patch.yml`,
+ * and a user or third party adds their own preset by publishing a bundle whose
+ * patch inserts one (e.g. `@local/dsh-yh-standard-preset`). Overriding a preset
+ * means replacing that whole list from the profile patch, so the takeover needs
+ * the rows verbatim — including their `!!js` custom tags.
  *
  * The roster service (`agentPresets.list()` / `compositionInventory()`) reports
  * evaluated metadata only: it exposes a row's `condition` text but never its
  * `config`, and it evaluates `!!js` expressions. Re-serializing from it would
- * therefore lose configs and rewrite tags. We read the shipped patch FILES as
+ * therefore lose configs and rewrite tags. We read the bundle patch FILES as
  * text instead, and hand each plugin row's lines back unchanged.
  *
- * Read-only: nothing here writes. Resolution goes through the preset row's own
- * module base so it works regardless of where the bundle is installed.
+ * Read-only: nothing here writes. Resolution goes through the plugin's own
+ * module base (the profile's `node_modules`), so it finds every bundle the
+ * profile has installed.
  *
  * @module @sidleo3/agent-instructions-plus/composition
  */
 
 import { readFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { createRequire } from 'node:module'
 import type { PresetCompositionRow } from './wizard.ts'
 
-/** The bundle that ships the built-in preset declarations. */
-const WEB_APP_PACKAGE = '@deepseek-ai/dsh-web-app'
+/** The module name every agent-preset declaration row carries. */
+const PRESET_MODULE = '@deepseek-ai/dsh-agent-preset'
 
-/**
- * Locate the shipped preset patch directory.
- *
- * Resolution starts from THIS plugin's own location: the plugin is installed
- * inside the profile, so its `node_modules` chain reaches the harness packages
- * that ship the preset declarations. The profile directory is tried as a
- * fallback for installs that hoist the harness elsewhere.
- *
- * @param ctx - host context; `profileContext.dir` supplies the fallback base.
- * @returns the `presets` directory, or undefined when unresolvable.
- */
-function presetPatchDirectory(ctx: unknown): string | undefined {
+/** A resolved bundle layer that may declare presets. */
+interface BundleLayer {
+  packageName: string
+  packageDir: string
+  patchFiles: string[]
+}
+
+/** Resolution bases, most specific first. */
+function resolutionBases(ctx: unknown): string[] {
   const profile = (ctx as { get?: (name: string) => unknown } | undefined)?.get?.('profileContext') as
     | { dir?: string }
     | undefined
-  const bases = [
+  return [
     import.meta.url,
     profile?.dir === undefined ? undefined : join(profile.dir, 'package.json'),
   ].filter((value): value is string => typeof value === 'string')
-  for (const base of bases) {
-    try {
-      const require = createRequire(base)
-      const manifest = require.resolve(`${WEB_APP_PACKAGE}/package.json`)
-      return join(dirname(manifest), 'presets')
-    } catch { /* try the next base */ }
-  }
-  return undefined
 }
 
-/** The patch file that declares one shipped preset. */
-function presetPatchFile(id: string): string {
-  return `${id}.patch.yml`
+/** The profile's declared bundle list, read from the running profile. */
+async function profileBundles(ctx: unknown): Promise<string[]> {
+  const profile = (ctx as { get?: (name: string) => unknown } | undefined)?.get?.('profileContext') as
+    | { dir?: string }
+    | undefined
+  if (profile?.dir === undefined) return []
+  for (const name of ['package.json']) {
+    try {
+      const manifest = JSON.parse(await readFile(join(profile.dir, name), 'utf8')) as {
+        dsh?: { profile?: { bundles?: unknown } }
+      }
+      const bundles = manifest.dsh?.profile?.bundles
+      if (Array.isArray(bundles)) return bundles.filter((b): b is string => typeof b === 'string')
+    } catch { /* fall through */ }
+  }
+  return []
+}
+
+/**
+ * Resolve each declared bundle to its patch files.
+ *
+ * Only bundles that declare `dsh.bundle.patch` can contribute Loader rows, so
+ * everything else is skipped without touching the filesystem.
+ *
+ * @param ctx - host context supplying the profile directory.
+ * @returns the resolvable bundle layers, in profile order.
+ */
+async function bundleLayers(ctx: unknown): Promise<BundleLayer[]> {
+  const out: BundleLayer[] = []
+  const seen = new Set<string>()
+  for (const packageName of await profileBundles(ctx)) {
+    if (seen.has(packageName)) continue
+    seen.add(packageName)
+    for (const base of resolutionBases(ctx)) {
+      try {
+        const require = createRequire(base)
+        const manifestPath = require.resolve(`${packageName}/package.json`)
+        const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+          dsh?: { bundle?: { patch?: unknown } }
+        }
+        const patch = manifest.dsh?.bundle?.patch
+        const list = Array.isArray(patch) ? patch : typeof patch === 'string' ? [patch] : []
+        if (list.length === 0) break
+        const packageDir = dirname(manifestPath)
+        out.push({
+          packageName,
+          packageDir,
+          patchFiles: list
+            .filter((p): p is string => typeof p === 'string')
+            .map(p => (isAbsolute(p) ? p : join(packageDir, p))),
+        })
+        break
+      } catch { /* bundle not resolvable from this base */ }
+    }
+  }
+  return out
 }
 
 /**
@@ -87,23 +132,63 @@ function splitPluginRows(lines: string[]): string[][] {
 }
 
 /**
- * Parse the plugin rows out of one shipped preset patch's text.
+ * Parse one preset declaration's plugin rows out of a bundle patch's text.
+ *
+ * Locates the `- id: preset-<id>` (or whatever row id the preset is declared
+ * under) whose `name:` is `@deepseek-ai/dsh-agent-preset`, then takes its
+ * `config.plugins` body. Matching on the module rather than on a file name is
+ * what lets a custom preset bundle be read the same way as a shipped one.
  *
  * Line-oriented on purpose: the patch carries `!!js` tags that a YAML
  * round-trip would evaluate and rewrite, so only indentation is interpreted
  * here and every scalar is preserved as literal text.
  *
- * @param text - the shipped patch file's contents.
- * @returns the preset's plugin rows in declaration order.
+ * @param text - one bundle patch file's contents.
+ * @param presetId - the preset id to extract.
+ * @returns the preset's plugin rows in declaration order, or [] when absent.
  */
-export function parseShippedComposition(text: string): PresetCompositionRow[] {
+export function parsePresetComposition(text: string, presetId: string): PresetCompositionRow[] {
   const raw = text.split(/\r?\n/)
-  // Find the `plugins:` key of the preset declaration, then take its body.
-  const startIndex = raw.findIndex(line => /^\s+plugins:\s*$/.test(line))
-  if (startIndex < 0) return []
-  const keyIndent = /^(\s*)plugins:/.exec(raw[startIndex])?.[1].length ?? 0
+  // Find the declaration carrying this preset id and the preset module.
+  let rowIndex = -1
+  for (let i = 0; i < raw.length; i++) {
+    const idMatch = /^(\s*)-\s+id:\s*(.+?)\s*$/.exec(raw[i])
+    if (idMatch === null) continue
+    const indent = idMatch[1].length
+    let isPreset = false
+    let declaredId: string | undefined
+    for (let j = i + 1; j < raw.length; j++) {
+      const line = raw[j]
+      if (line.trim() === '') continue
+      const lineIndent = /^(\s*)/.exec(line)?.[1].length ?? 0
+      if (lineIndent <= indent) break
+      if (/^\s*name:\s*['"]?@deepseek-ai\/dsh-agent-preset['"]?\s*$/.test(line)) isPreset = true
+      // `config.id` is the authoritative preset id; the row id is only a
+      // Loader identifier and a custom bundle may name it differently
+      // (e.g. row `preset-yh-standard` declaring preset `yh-standard`).
+      const configId = /^\s*id:\s*(.+?)\s*$/.exec(line)
+      if (configId !== null) declaredId = unquote(configId[1])
+    }
+    if (!isPreset) continue
+    const byRowId = unquote(idMatch[2])
+    if (declaredId === presetId || byRowId === presetId) { rowIndex = i; break }
+  }
+  if (rowIndex < 0) return []
+  const rowIndent = /^(\s*)/.exec(raw[rowIndex])?.[1].length ?? 0
+
+  // Take the `plugins:` body belonging to this row.
+  let pluginsIndex = -1
+  for (let i = rowIndex + 1; i < raw.length; i++) {
+    const line = raw[i]
+    if (line.trim() === '') continue
+    const indent = /^(\s*)/.exec(line)?.[1].length ?? 0
+    if (indent <= rowIndent) break
+    if (/^\s*plugins:\s*$/.test(line)) { pluginsIndex = i; break }
+  }
+  if (pluginsIndex < 0) return []
+  const keyIndent = /^(\s*)plugins:/.exec(raw[pluginsIndex])?.[1].length ?? 0
   const body: string[] = []
-  for (let i = startIndex + 1; i < raw.length; i++) {
+  for (let i = pluginsIndex + 1; i < raw.length; i++) {
     const line = raw[i]
     if (line.trim() === '') { body.push(line); continue }
     const indent = /^(\s*)/.exec(line)?.[1].length ?? 0
@@ -160,10 +245,15 @@ function unquote(value: string): string {
 }
 
 /**
- * Read every shipped preset's plugin composition.
+ * Read every preset's plugin composition, from every bundle layer.
  *
- * A preset whose patch file is missing or unreadable is simply absent from the
- * map; the caller treats that as "cannot take over" rather than inventing rows.
+ * Presets come from DSH's shipped `presets/*.patch.yml` files AND from any
+ * third-party or local bundle that inserts its own `@deepseek-ai/dsh-agent-preset`
+ * row (a custom preset is exactly that). We therefore walk the profile's bundle
+ * list and scan each bundle's patch files.
+ *
+ * A preset whose declaration cannot be read is simply absent from the map; the
+ * caller treats that as "cannot take over" rather than inventing rows.
  *
  * @param ctx - host context providing `profileContext` for module resolution.
  * @returns preset id → plugin rows, in declaration order.
@@ -172,29 +262,125 @@ export async function listPresetCompositions(
   ctx: unknown,
 ): Promise<Map<string, PresetCompositionRow[]>> {
   const out = new Map<string, PresetCompositionRow[]>()
-  const directory = presetPatchDirectory(ctx)
-  if (directory === undefined) return out
-  // The roster's ids are the patch file basenames; read them from the package's
-  // own manifest so a preset DSH adds or removes is followed, not guessed.
-  let ids: string[]
-  try {
-    const manifestPath = join(dirname(directory), 'package.json')
-    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
-      dsh?: { bundle?: { patch?: string | string[] } }
+  const layers = await bundleLayers(ctx)
+  for (const layer of layers) {
+    for (const patchFile of layer.patchFiles) {
+      let text: string
+      try {
+        text = await readFile(patchFile, 'utf8')
+      } catch { continue }
+      // Every preset id this patch declares, so one file may carry several.
+      for (const id of declaredPresetIds(text)) {
+        if (out.has(id)) continue
+        const rows = parsePresetComposition(text, id)
+        if (rows.length > 0) out.set(id, rows)
+      }
     }
-    const patches = manifest.dsh?.bundle?.patch
-    const list = Array.isArray(patches) ? patches : patches === undefined ? [] : [patches]
-    ids = list
-      .filter(entry => entry.includes('/presets/'))
-      .map(entry => entry.slice(entry.lastIndexOf('/') + 1).replace(/\.patch\.yml$/, ''))
-  } catch {
-    return out
-  }
-  for (const id of ids) {
-    try {
-      const text = await readFile(join(directory, presetPatchFile(id)), 'utf8')
-      out.set(id, parseShippedComposition(text))
-    } catch { /* preset without a readable patch */ }
   }
   return out
+}
+
+/**
+ * Read each preset's declared display metadata from the bundle patches.
+ *
+ * `agentPresets.list()` reports the raw id as `name` when the declaration
+ * carries no `name` field (all shipped presets), so the patch is the
+ * authoritative source for the display text a custom preset declared.
+ *
+ * @param ctx - host context providing `profileContext` for module resolution.
+ * @returns preset id → declared name, description and order (only what is set).
+ */
+export async function listPresetDeclarations(
+  ctx: unknown,
+): Promise<Map<string, { name?: string, description?: string, order?: number }>> {
+  const out = new Map<string, { name?: string, description?: string, order?: number }>()
+  for (const layer of await bundleLayers(ctx)) {
+    for (const patchFile of layer.patchFiles) {
+      let text: string
+      try {
+        text = await readFile(patchFile, 'utf8')
+      } catch { continue }
+      for (const [id, meta] of parseDeclarations(text)) {
+        if (!out.has(id)) out.set(id, meta)
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * The display metadata each preset declares in one patch file.
+ *
+ * Only the declaration's own `config.name` / `config.description` / `config.order`
+ * are read — never a plugin row's, so a nested row cannot shadow its preset.
+ *
+ * @param text - one bundle patch file's contents.
+ * @returns preset id → its declared metadata.
+ */
+function parseDeclarations(
+  text: string,
+): Map<string, { name?: string, description?: string, order?: number }> {
+  const raw = text.split(/\r?\n/)
+  const out = new Map<string, { name?: string, description?: string, order?: number }>()
+  for (let i = 0; i < raw.length; i++) {
+    const idMatch = /^(\s*)-\s+id:\s*(.+?)\s*$/.exec(raw[i])
+    if (idMatch === null) continue
+    const indent = idMatch[1].length
+    let isPreset = false
+    let declaredId: string | undefined
+    const meta: { name?: string, description?: string, order?: number } = {}
+    for (let j = i + 1; j < raw.length; j++) {
+      const line = raw[j]
+      if (line.trim() === '') continue
+      const lineIndent = /^(\s*)/.exec(line)?.[1].length ?? 0
+      if (lineIndent <= indent) break
+      if (/^\s*name:\s*['"]?@deepseek-ai\/dsh-agent-preset['"]?\s*$/.test(line)) { isPreset = true; continue }
+      // Stop at the nested `plugins:` list: everything past it belongs to rows.
+      if (/^\s*plugins:\s*$/.test(line)) break
+      const configId = /^\s*id:\s*(.+?)\s*$/.exec(line)
+      if (configId !== null) { declaredId = unquote(configId[1]); continue }
+      const nameMatch = /^\s*name:\s*(.+?)\s*$/.exec(line)
+      if (nameMatch !== null && meta.name === undefined) { meta.name = unquote(nameMatch[1]); continue }
+      const descMatch = /^\s*description:\s*(.+?)\s*$/.exec(line)
+      if (descMatch !== null && meta.description === undefined) { meta.description = unquote(descMatch[1]); continue }
+      const orderMatch = /^\s*order:\s*(\d+)\s*$/.exec(line)
+      if (orderMatch !== null && meta.order === undefined) { meta.order = Number(orderMatch[1]) }
+    }
+    if (isPreset && declaredId !== undefined && !out.has(declaredId)) out.set(declaredId, meta)
+  }
+  return out
+}
+
+/**
+ * Every preset id declared in one patch file.
+ *
+ * Keyed by `config.id` — the authoritative preset id, which is what the roster
+ * reports and what a session records. A shipped preset patch declares exactly
+ * one; a custom preset bundle may declare several, and its Loader row id may
+ * differ from the preset id it declares.
+ *
+ * @param text - one bundle patch file's contents.
+ * @returns the declared preset ids, in file order.
+ */
+function declaredPresetIds(text: string): string[] {
+  const raw = text.split(/\r?\n/)
+  const ids: string[] = []
+  for (let i = 0; i < raw.length; i++) {
+    const idMatch = /^(\s*)-\s+id:\s*(.+?)\s*$/.exec(raw[i])
+    if (idMatch === null) continue
+    const indent = idMatch[1].length
+    let isPreset = false
+    let declaredId: string | undefined
+    for (let j = i + 1; j < raw.length; j++) {
+      const line = raw[j]
+      if (line.trim() === '') continue
+      const lineIndent = /^(\s*)/.exec(line)?.[1].length ?? 0
+      if (lineIndent <= indent) break
+      if (/^\s*name:\s*['"]?@deepseek-ai\/dsh-agent-preset['"]?\s*$/.test(line)) isPreset = true
+      const configId = /^\s*id:\s*(.+?)\s*$/.exec(line)
+      if (configId !== null) declaredId = unquote(configId[1])
+    }
+    if (isPreset && declaredId !== undefined && !ids.includes(declaredId)) ids.push(declaredId)
+  }
+  return ids
 }

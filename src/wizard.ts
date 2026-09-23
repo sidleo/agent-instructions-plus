@@ -35,7 +35,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { parseDocument } from 'yaml'
-import { listPresetCompositions } from './composition.ts'
+import { listPresetCompositions, listPresetDeclarations } from './composition.ts'
 
 /** The preset row id the injection pipeline registers under. */
 export const PIPELINE_ROW_ID = 'agent-instructions-plus-pipeline'
@@ -366,6 +366,9 @@ export async function applyPreset(
   if (!composition.some(row => row.id === BUILTIN_ROW_ID)) {
     return { ok: false, error: '预设 ' + presetId + ' 不含 agent-instructions 行，无需接管' }
   }
+  // The declaration's own display metadata, so the override preserves the name
+  // and description a custom preset bundle declared.
+  const declaration = (await listPresetDeclarations(ctx)).get(presetId)
 
   const existing = await readTakeoverState(ctx, presetId)
   if (existing.pipelineActive && existing.builtinDisabled) {
@@ -402,9 +405,11 @@ export async function applyPreset(
     '  config:',
     `    id: ${presetId}`,
   ]
-  if (preset.order !== undefined) lines.push(`    order: ${preset.order}`)
-  if (preset.name !== undefined) lines.push(`    name: ${JSON.stringify(preset.name)}`)
-  if (preset.description !== undefined) lines.push(`    description: ${JSON.stringify(preset.description)}`)
+  if (declaration?.order !== undefined) lines.push(`    order: ${declaration.order}`)
+  // Carry the preset's own display text through: the roster reports raw ids as
+  // `name` for a custom preset, so the patch is the authoritative source.
+  if (declaration?.name !== undefined) lines.push(`    name: ${JSON.stringify(declaration.name)}`)
+  if (declaration?.description !== undefined) lines.push(`    description: ${JSON.stringify(declaration.description)}`)
   lines.push('    plugins:')
   for (const row of composition) lines.push(...pluginRowLines(row, true))
   // Append the injection pipeline last so it composes after the settings rows.
