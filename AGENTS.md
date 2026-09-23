@@ -143,3 +143,24 @@ DSH Host 进程
 - 配置持久化在 `~/.dsh/dsh-instruction-scan.json`（GUI 修改即时生效，下次 pre-step 重读）
 - 消息注入标记 `provider: instruction-scan`（兼容旧 bundle 已持久化的消息）
 - 覆盖行的 `plugins` 是**整表替换**：DSH 升级改动 shipped preset 后，旧覆盖会固化旧组合，需在 GUI 取消再勾选以重建
+
+## ⚠️ 安装：必须改 profile 的 pin，不能只拷文件
+
+**结论：永远用 `dsh plugin --profile <p> add @sidleo3/agent-instructions-plus@<ver>`，不要手动 `cp` 到 `~/.dsh/profiles/<p>/node_modules/`。**
+
+`dsh web` 启动时会按 profile 的 `package.json` + `pnpm-lock.yaml` 跑一次 `pnpm install`。profile 里 pin 的是哪个版本，`node_modules` 就会被还原成哪个版本 —— 手动拷进去的新构建会被**静默覆盖回旧版**。踩过一次：手拷 0.3.1 后重启，`lib/client.js` 变回 0.2.7（注册的是已删除的 `settings.plugin.item`），配置页整个空白。
+
+```bash
+# 正确：同时更新 package.json 的 pin 与 pnpm-lock
+dsh plugin --profile web add @sidleo3/agent-instructions-plus@0.3.1
+```
+
+排查"页面空了 / 行为没变"的第一步，就是对比**磁盘上的版本**与 **profile 的 pin**：
+
+```bash
+grep '"version"' ~/.dsh/profiles/web/node_modules/@sidleo3/agent-instructions-plus/package.json
+grep 'agent-instructions-plus' ~/.dsh/profiles/web/package.json
+grep -c 'plugins.bundle.config' ~/.dsh/profiles/web/node_modules/@sidleo3/agent-instructions-plus/lib/client.js  # 期望 >=1
+```
+
+装完必须**重启 DSH**：运行中的 host 仍持有旧模块。判断当前进程跑的是哪版，看 `GET /api/agent-instructions-plus/presets` 的 `trust` 字段 —— `shipped` 是新构建（读 shipped patch），`user` 是旧构建。
