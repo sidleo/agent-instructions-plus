@@ -24,7 +24,7 @@
 | `src/index.ts` | Host 入口：provider 注册、GUI RPC、配置读写（`~/.dsh/dsh-instruction-scan.json`） |
 | `src/preset.ts` | Session 平面注入管线（`/preset` 子路径）：baseline 合成、增量 reconcile、去重 |
 | `src/wizard.ts` | preset 接管管理器：勾选/取消时**行级编辑** profile 的 `cordis.patch.yml`（applyPreset / removePreset / readTakeoverState） |
-| `src/composition.ts` | 读取 shipped preset 组合：从 `@deepseek-ai/dsh-web-app/presets/*.patch.yml` 按行捕获插件行原文（保留 `!!js` 标签） |
+| `src/composition.ts` | 读取 preset 组合与展示元数据：遍历 profile 的所有 bundle patch，按模块名提取 `@deepseek-ai/dsh-agent-preset` 声明，按 `config.id` 索引；按行捕获插件行原文（保留 `!!js` 标签） |
 | `src/config.ts` | 配置归一化（四层扫描开关、文件候选、项目根标记、字节预算） |
 | `src/discovery.ts` | 四层扫描目录发现（cwd → project/parents → global） |
 | `src/files.ts` | 有界、可中止的指令文件探测与读取（`ctx.fs`，node-fs fallback） |
@@ -127,6 +127,18 @@ shipped patch 里插件行的缩进是：`plugins:`(4) → 行 opener(6) → 行
 `@deepseek-ai/dsh-*` 的类型缺失时，`tsc` 会对每个用到它们的符号报 `Cannot find module` / 隐式 `any`，**把这些文件里的真实类型错误一起淹掉**。本仓库曾长期有 28 条噪音，接上真类型（见"构建与发布"）后立刻暴露出 2 个真 bug（坑点 7、8）。
 
 结论：不要把这类噪音当"已知背景"接受。判断有无回归不要只比错误条数，要**接上真类型把错误清零**。
+
+### 10. preset 可能来自任意 bundle，不能只读 DSH 内置
+
+preset 是声明式的 `@deepseek-ai/dsh-agent-preset` Loader 行，**可以来自任何 bundle 层**：DSH 把内置的放在 `@deepseek-ai/dsh-web-app/presets/*.patch.yml`，而用户/三方是发布一个自己的 bundle，在里面 `insert` 一行。本机就有一个：`@local/dsh-yh-standard-preset` 声明 `yh-standard`。
+
+只读 `dsh-web-app/presets/` 会**漏掉所有自定义 preset**，且表现极具误导性 —— 界面把它归到"未列出 · 不含 agent-instructions 行"，而它其实含该行。正确做法：遍历 profile 的 `dsh.profile.bundles`，解析每个 bundle 的 `dsh.bundle.patch` 文件，按**模块名**（`@deepseek-ai/dsh-agent-preset`）提取声明，不依赖文件路径或命名。
+
+### 11. preset 的 id 是 `config.id`，不是 Loader 行 id
+
+两者可以不同：自定义 bundle 常写成 `- id: preset-yh-standard` 而 `config.id: yh-standard`。**`config.id` 才是 roster 报告、会话 `agentPreset` 记录的 id**，接管也必须按它索引 —— 按行 id 索引会导致"发现得到却匹配不上 roster"。
+
+同理，`agentPresets.list()` 对**没有 `name` 字段**的声明返回原始 id（所有内置 preset 都没有 `name`，自定义的才有）。所以写覆盖行时要取 patch 里声明的 `name`/`description`/`order`，否则会把 `YH标准模式` 写成 `yh-standard`。`listPresetDeclarations()` 就是干这个的。
 
 ## 运行时架构速览
 
